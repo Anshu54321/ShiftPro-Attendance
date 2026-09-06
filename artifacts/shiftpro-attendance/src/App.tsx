@@ -19,6 +19,8 @@ type Settings = {
   overtimeRate: number;
   bonusPerShift: number;
   currency: string;
+  payCycleStartDay: number;
+  payCycleEndDay: number;
 };
 type Shift = {
   date: string;
@@ -48,6 +50,8 @@ const defaultSettings: Settings = {
   overtimeRate: 27.75,
   bonusPerShift: 0,
   currency: '₹',
+  payCycleStartDay: 1,
+  payCycleEndDay: 31,
 };
 
 function dateKey(date: Date) {
@@ -82,9 +86,32 @@ function friendlyDate(key: string, year = false) {
 function monthTitle(date: Date) {
   return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
+function clampDay(day: number) {
+  return Math.min(31, Math.max(1, Math.round(day || 1)));
+}
+function daysInMonth(year: number, month: number) {
+  return new Date(year, month + 1, 0).getDate();
+}
+function getPayrollPeriod(anchor: Date, settings: Settings) {
+  const startDay = clampDay(settings.payCycleStartDay);
+  const endDay = clampDay(settings.payCycleEndDay);
+  const periodStartMonth = new Date(anchor.getFullYear(), anchor.getMonth() - (anchor.getDate() < startDay ? 1 : 0), 1);
+  const periodEndMonth = new Date(periodStartMonth.getFullYear(), periodStartMonth.getMonth() + (startDay > endDay ? 1 : 0), 1);
+  const start = new Date(periodStartMonth.getFullYear(), periodStartMonth.getMonth(), Math.min(startDay, daysInMonth(periodStartMonth.getFullYear(), periodStartMonth.getMonth())));
+  const end = new Date(periodEndMonth.getFullYear(), periodEndMonth.getMonth(), Math.min(endDay, daysInMonth(periodEndMonth.getFullYear(), periodEndMonth.getMonth())));
+  return { start, end };
+}
+function payrollPeriodLabel(period: { start: Date; end: Date }) {
+  const format = (date: Date) => date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${format(period.start)} – ${format(period.end)}`;
+}
+function shiftDurationMinutes(entry: string, exit: string) {
+  let total = minutesFromTime(exit) - minutesFromTime(entry);
+  if (total < 0) total += 24 * 60;
+  return total;
+}
 function computeShift(shift: Shift, settings: Settings): ComputedShift {
-  let totalMinutes = minutesFromTime(shift.exit) - minutesFromTime(shift.entry);
-  if (totalMinutes < 0) totalMinutes += 24 * 60;
+  const totalMinutes = shiftDurationMinutes(shift.entry, shift.exit);
   const paidMinutes = Math.max(0, totalMinutes - shift.breakCount * settings.breakMinutes);
   const regularMinutes = Math.min(paidMinutes, settings.dutyHours * 60);
   const overtimeMinutes = Math.max(0, paidMinutes - regularMinutes);
@@ -146,11 +173,14 @@ function Home() {
   }, [toast]);
   const computedShifts = useMemo(() => Object.values(storage.shifts).map((shift) => computeShift(shift, storage.settings)), [storage.shifts, storage.settings]);
   const now = new Date();
-  const monthPrefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
-  const monthShifts = computedShifts.filter((shift) => shift.date.startsWith(monthPrefix));
-  const currentMonthPay = monthShifts.reduce((sum, shift) => sum + shift.pay, 0);
-  const currentMonthMinutes = monthShifts.reduce((sum, shift) => sum + shift.paidMinutes, 0);
-  const currentMonthOvertime = monthShifts.reduce((sum, shift) => sum + shift.overtimeMinutes, 0);
+  const payrollPeriod = useMemo(() => getPayrollPeriod(month, storage.settings), [month, storage.settings]);
+  const payrollShifts = computedShifts.filter((shift) => {
+    const date = dateFromKey(shift.date);
+    return date >= payrollPeriod.start && date <= payrollPeriod.end;
+  });
+  const currentMonthPay = payrollShifts.reduce((sum, shift) => sum + shift.pay, 0);
+  const currentMonthMinutes = payrollShifts.reduce((sum, shift) => sum + shift.paidMinutes, 0);
+  const currentMonthOvertime = payrollShifts.reduce((sum, shift) => sum + shift.overtimeMinutes, 0);
   const todayKey = dateKey(now);
 
   function navigate(next: View) {
@@ -213,7 +243,7 @@ function Home() {
           <button onClick={() => { setEditorDate(todayKey); }} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-3.5 py-2.5 text-sm font-bold text-white shadow-[0_5px_15px_rgba(229,104,76,.25)] transition-transform hover:-translate-y-0.5" data-testid="button-log-shift-header"><Plus size={17} strokeWidth={2.5} /><span className="hidden sm:inline">Log a shift</span><span className="sm:hidden">Log</span></button>
         </header>
         <div className="mx-auto max-w-[1380px] px-5 py-7 md:px-10 md:py-9">
-          {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
+          {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} payrollPeriod={payrollPeriod} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onPreviousPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNextPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
           {view === 'calendar' && <CalendarView month={month} setMonth={setMonth} shifts={computedShifts} settings={storage.settings} todayKey={todayKey} onEdit={setEditorDate} onAdd={(key) => setEditorDate(key)} />}
           {view === 'settings' && <SettingsView settings={storage.settings} setSettings={storage.setSettings} onSaved={() => setToast('Pay rules updated')} />}
         </div>
@@ -236,21 +266,28 @@ function MobileNav({ icon, label, active, onClick, testId }: { icon: React.React
   return <button onClick={onClick} className={`flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 text-[10px] font-bold ${active ? 'text-[hsl(var(--primary))]' : 'text-[hsl(var(--muted-foreground))]'}`} data-testid={testId}>{icon}<span>{label}</span></button>;
 }
 
-function Dashboard({ settings, shifts, todayKey, month, monthPay, monthMinutes, monthOvertime, onAdd, onEdit, onCalendar }: { settings: Settings; shifts: ComputedShift[]; todayKey: string; month: Date; monthPay: number; monthMinutes: number; monthOvertime: number; onAdd: () => void; onEdit: (key: string) => void; onCalendar: () => void }) {
+function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, monthPay, monthMinutes, monthOvertime, onPreviousPeriod, onNextPeriod, onAdd, onEdit, onCalendar }: { settings: Settings; shifts: ComputedShift[]; todayKey: string; month: Date; payrollPeriod: { start: Date; end: Date }; monthPay: number; monthMinutes: number; monthOvertime: number; onPreviousPeriod: () => void; onNextPeriod: () => void; onAdd: () => void; onEdit: (key: string) => void; onCalendar: () => void }) {
   const today = shifts.find((shift) => shift.date === todayKey);
-  const monthPrefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
-  const monthShifts = shifts.filter((shift) => shift.date.startsWith(monthPrefix)).sort((a, b) => b.date.localeCompare(a.date));
+  const monthShifts = shifts.filter((shift) => {
+    const date = dateFromKey(shift.date);
+    return date >= payrollPeriod.start && date <= payrollPeriod.end;
+  }).sort((a, b) => b.date.localeCompare(a.date));
   const daysWorked = monthShifts.length;
-  const expectedDays = Math.max(1, Math.min(new Date().getDate(), 22));
+  const periodDays = Math.round((payrollPeriod.end.getTime() - payrollPeriod.start.getTime()) / 86400000) + 1;
+  const expectedDays = Math.max(1, Math.min(periodDays, Math.round(periodDays * 0.75)));
   const progress = Math.min(100, Math.round((daysWorked / expectedDays) * 100));
   return <div className="space-y-7">
+    <section className="fade-up flex flex-col justify-between gap-4 rounded-2xl border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] px-4 py-4 shadow-[var(--shadow-sm)] sm:flex-row sm:items-center md:px-5">
+      <div><div className="font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]">Payroll period</div><div className="mt-1 font-display text-lg font-bold">{payrollPeriodLabel(payrollPeriod)}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Company cycle: day {settings.payCycleStartDay} to day {settings.payCycleEndDay}</div></div>
+      <div className="flex items-center gap-2"><button onClick={onPreviousPeriod} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-2.5 hover:bg-[hsl(var(--muted))]" aria-label="Previous payroll period" data-testid="button-payroll-period-prev"><ChevronLeft size={18} /></button><div className="min-w-[104px] text-center font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{monthTitle(month)}</div><button onClick={onNextPeriod} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-2.5 hover:bg-[hsl(var(--muted))]" aria-label="Next payroll period" data-testid="button-payroll-period-next"><ChevronRight size={18} /></button></div>
+    </section>
     <section className="fade-up relative overflow-hidden rounded-[28px] bg-[linear-gradient(135deg,#141d3c_0%,#273b68_48%,#057b78_100%)] px-5 py-6 text-white shadow-[0_22px_55px_rgba(20,29,60,.2)] md:px-9 md:py-8">
       <div className="absolute -right-20 -top-24 h-72 w-72 rounded-full border-[34px] border-[#f9d45c]/20" />
       <div className="absolute -bottom-24 right-24 h-64 w-64 rounded-full bg-[#ef6f58]/20 blur-3xl" />
       <div className="absolute right-8 top-8 hidden h-20 w-20 rounded-3xl border border-white/20 bg-white/10 rotate-12 md:block" />
       <div className="relative flex flex-col justify-between gap-8 lg:flex-row lg:items-end">
         <div className="max-w-2xl">
-          <div className="mb-4 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.2em] text-[#f9d45c]"><span className="h-1.5 w-1.5 rounded-full bg-[#f9d45c]" />{today ? 'Today is on the board' : 'Monthly payroll board'}</div>
+          <div className="mb-4 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.2em] text-[#f9d45c]"><span className="h-1.5 w-1.5 rounded-full bg-[#f9d45c]" />{today ? 'Today is on the board' : 'Payroll period board'}</div>
           <h2 className="m-0 max-w-[680px] font-display text-[clamp(2.25rem,5vw,4.7rem)] font-bold leading-[.94] tracking-[-.055em]">{today ? `Today is worth ${formatMoney(today.pay, settings.currency)}.` : 'Make every workday count.'}</h2>
           <p className="mt-4 max-w-xl text-sm leading-relaxed text-blue-100/80">{today ? `${formatDuration(today.paidMinutes)} paid today${today.overtimeMinutes ? ` · ${formatDuration(today.overtimeMinutes)} overtime` : ''} · ${today.shiftType === 'night' ? 'night shift' : 'day shift'}.` : 'Track day and night shifts, see overtime as it happens, and keep your Indian rupee earnings clear.'}</p>
           <div className="mt-6 flex flex-wrap gap-3">
@@ -266,7 +303,7 @@ function Dashboard({ settings, shifts, todayKey, month, monthPay, monthMinutes, 
       </div>
     </section>
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      <MetricCard label="This month" value={formatMoney(monthPay, settings.currency)} sub={monthPay ? 'estimated earnings' : 'nothing logged yet'} icon={<Banknote size={18} />} tone="coral" />
+      <MetricCard label="This period" value={formatMoney(monthPay, settings.currency)} sub={monthPay ? 'estimated earnings' : 'nothing logged yet'} icon={<Banknote size={18} />} tone="coral" />
       <MetricCard label="Days worked" value={String(daysWorked)} sub={`${formatDuration(monthMinutes)} paid time`} icon={<CalendarDays size={18} />} tone="teal" />
       <MetricCard label="Overtime" value={formatDuration(monthOvertime)} sub={monthOvertime ? 'at your OT rate' : 'no overtime logged'} icon={<TrendingUp size={18} />} tone="yellow" />
       <MetricCard label="Average day" value={daysWorked ? formatMoney(monthPay / daysWorked, settings.currency) : formatMoney(0, settings.currency)} sub="per logged day" icon={<Gauge size={18} />} tone="blue" />
@@ -338,9 +375,10 @@ function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { 
   const [error, setError] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
   const preview = computeShift({ date, entry, exit, shiftType, isHoliday, breakCount, manual, manualAmount: Number(manualAmount) || 0 }, settings);
+  const isOvernight = minutesFromTime(exit) < minutesFromTime(entry);
   useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, []);
   function save() {
-    const total = minutesFromTime(exit) - minutesFromTime(entry) + (minutesFromTime(exit) <= minutesFromTime(entry) ? 1440 : 0);
+    const total = shiftDurationMinutes(entry, exit);
     if (!entry || !exit) { setError('Add both an entry and exit time.'); return; }
     if (total <= breakCount * settings.breakMinutes) { setError('Your break time cannot be longer than this shift.'); return; }
     if (manual && (!manualAmount || Number(manualAmount) < 0)) { setError('Add the manual amount you want to use.'); return; }
@@ -350,7 +388,8 @@ function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { 
   return <div className="fixed inset-0 z-40 flex items-end justify-center bg-slate-950/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className="fade-up max-h-[92dvh] w-full overflow-y-auto rounded-t-[25px] border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-2xl sm:max-w-[540px] sm:rounded-[25px]">
     <div className="sticky top-0 z-10 flex items-start justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--card)/.96)] px-5 py-5 backdrop-blur-md md:px-7"><div><div className="mb-1 font-mono text-[10px] uppercase tracking-[.16em] text-[hsl(var(--primary))]">{existing ? 'Edit logged day' : 'New day entry'}</div><h2 className="m-0 font-display text-2xl font-bold">{labelDate}</h2></div><button onClick={onClose} className="rounded-xl p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-close-editor"><X size={19} /></button></div>
      <div className="space-y-5 px-5 py-6 md:px-7">
-       <div className="grid grid-cols-2 gap-3"><TimeField label="Entry (AM / PM)" value={entry} onChange={setEntry} testId="input-entry-time" /><TimeField label="Exit (AM / PM)" value={exit} onChange={setExit} testId="input-exit-time" /></div>
+        <div className="grid grid-cols-2 gap-3"><TimeField label="Entry (AM / PM)" value={entry} onChange={setEntry} testId="input-entry-time" /><TimeField label="Exit (AM / PM)" value={exit} onChange={setExit} testId="input-exit-time" /></div>
+        <div className="flex items-center gap-2 rounded-xl bg-[hsl(var(--muted)/.65)] px-3 py-2.5 text-xs text-[hsl(var(--muted-foreground))]"><Clock3 size={14} className="shrink-0 text-[hsl(var(--primary))]" />{isOvernight ? 'Overnight timing: exit is counted on the next day, and extra time after regular duty becomes OT.' : `Regular duty is ${settings.dutyHours}h; anything beyond it becomes OT.`}</div>
        <div><div className="mb-2 flex items-center justify-between"><label className="text-sm font-bold">Shift type</label><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{shiftType === 'night' ? 'Night hours' : 'Day hours'}</span></div><div className="grid grid-cols-2 gap-2"><button type="button" onClick={() => setShiftType('day')} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition-colors ${shiftType === 'day' ? 'border-[#4aaa83] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-day"><Sun size={16} /> Day shift</button><button type="button" onClick={() => setShiftType('night')} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition-colors ${shiftType === 'night' ? 'border-[#9e7bd0] bg-[#eee8fc] text-[#6d4a9d]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-night"><Moon size={16} /> Night shift</button></div></div>
        <button type="button" onClick={() => setIsHoliday(!isHoliday)} className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-3 text-left transition-colors ${isHoliday ? 'border-[#e87368] bg-[#ffe1de]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))]'}`} aria-pressed={isHoliday} data-testid="button-toggle-holiday"><span><span className="block text-sm font-bold">Holiday workday</span><span className="mt-0.5 block text-[11px] text-[hsl(var(--muted-foreground))]">Show this date in red on the calendar</span></span><span className={`relative h-6 w-11 rounded-full transition-colors ${isHoliday ? 'bg-[#d94f49]' : 'bg-[hsl(var(--border))]'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${isHoliday ? 'left-6' : 'left-1'}`} /></span></button>
       <div className="rounded-2xl bg-[hsl(var(--muted)/.65)] p-4"><div className="mb-3 flex items-center justify-between"><label className="flex items-center gap-2 text-sm font-bold"><Coffee size={16} className="text-[hsl(var(--primary))]" />Breaks taken</label><span className="font-mono text-[10px] text-[hsl(var(--muted-foreground))]">{settings.breakMinutes} min each</span></div><div className="flex items-center justify-between"><span className="text-xs text-[hsl(var(--muted-foreground))]">Unpaid breaks during this shift</span><div className="flex items-center gap-3"><button onClick={() => setBreakCount(Math.max(0, breakCount - 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-decrease">−</button><span className="w-5 text-center font-mono font-medium" data-testid="text-break-count">{breakCount}</span><button onClick={() => setBreakCount(Math.min(8, breakCount + 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-increase">+</button></div></div></div>
@@ -362,19 +401,32 @@ function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { 
     </div>
   </div></div>;
 }
+function timeParts(time: string) {
+  const [rawHours, rawMinutes] = time.split(':').map(Number);
+  const hours = Number.isNaN(rawHours) ? 9 : rawHours;
+  const minutes = Number.isNaN(rawMinutes) ? 0 : rawMinutes;
+  return { hour: String(hours % 12 || 12), minute: String(minutes).padStart(2, '0'), period: hours >= 12 ? 'PM' : 'AM' };
+}
+function timeFromParts(hour: string, minute: string, period: string) {
+  let hours = Number(hour) % 12;
+  if (period === 'PM') hours += 12;
+  return `${String(hours).padStart(2, '0')}:${minute}`;
+}
 function TimeField({ label, value, onChange, testId }: { label: string; value: string; onChange: (value: string) => void; testId: string }) {
-  return <div><label className="mb-2 block text-sm font-bold">{label}</label><div className="relative"><AlarmClock size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" /><input type="time" value={value} onChange={(event) => onChange(event.target.value)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input pl-10 font-mono" data-testid={testId} /></div><div className="mt-1.5 pl-1 font-mono text-[11px] font-bold tracking-wide text-[hsl(var(--primary))]">{formatTime12(value)}</div></div>;
+  const parts = timeParts(value);
+  const updateTime = (hour: string, minute: string, period: string) => onChange(timeFromParts(hour, minute, period));
+  return <div><label className="mb-2 block text-sm font-bold">{label}</label><div className="grid grid-cols-[1fr_1fr_1.1fr] gap-1.5"><div className="relative"><AlarmClock size={14} className="pointer-events-none absolute left-2 top-1/2 z-[1] -translate-y-1/2 text-[hsl(var(--muted-foreground))]" /><select value={parts.hour} onChange={(event) => updateTime(event.target.value, parts.minute, parts.period)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input pl-7 font-mono text-xs" aria-label={`${label} hour`} data-testid={`${testId}-hour`}>{Array.from({ length: 12 }, (_, index) => String(index + 1)).map((hour) => <option key={hour} value={hour}>{hour}</option>)}</select></div><select value={parts.minute} onChange={(event) => updateTime(parts.hour, event.target.value, parts.period)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input font-mono text-xs" aria-label={`${label} minute`} data-testid={`${testId}-minute`}>{Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0')).map((minute) => <option key={minute} value={minute}>{minute}</option>)}</select><select value={parts.period} onChange={(event) => updateTime(parts.hour, parts.minute, event.target.value)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input font-mono text-xs font-bold" aria-label={`${label} AM or PM`} data-testid={`${testId}-period`}><option value="AM">AM</option><option value="PM">PM</option></select></div><div className="mt-1.5 pl-1 font-mono text-[11px] font-bold tracking-wide text-[hsl(var(--primary))]">{formatTime12(value)}</div></div>;
 }
 
 function SettingsView({ settings, setSettings, onSaved }: { settings: Settings; setSettings: (value: Settings | ((previous: Settings) => Settings)) => void; onSaved: () => void }) {
   const [draft, setDraft] = useState(settings);
   useEffect(() => setDraft(settings), [settings]);
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setDraft((current) => ({ ...current, [key]: value })); }
-  function save() { if (draft.dutyHours <= 0 || draft.breakMinutes < 0 || draft.hourlyRate < 0 || draft.overtimeRate < 0 || draft.bonusPerShift < 0) return; setSettings(draft); onSaved(); }
+  function save() { if (draft.dutyHours <= 0 || draft.breakMinutes < 0 || draft.hourlyRate < 0 || draft.overtimeRate < 0 || draft.bonusPerShift < 0 || draft.payCycleStartDay < 1 || draft.payCycleStartDay > 31 || draft.payCycleEndDay < 1 || draft.payCycleEndDay > 31) return; setSettings({ ...draft, payCycleStartDay: clampDay(draft.payCycleStartDay), payCycleEndDay: clampDay(draft.payCycleEndDay), currency: '₹' }); onSaved(); }
   return <div className="mx-auto max-w-[900px] space-y-7">
     <section className="fade-up"><div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]"><SettingsIcon size={14} /> Personal rules</div><h2 className="m-0 font-display text-3xl font-bold tracking-tight md:text-4xl">Make the maths yours.</h2><p className="mt-2 max-w-xl text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">Set the rules from your contract or payslip. Every shift will use these numbers instantly.</p></section>
     <section className="fade-up delay-1 overflow-hidden rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] shadow-[var(--shadow-sm)]"><div className="border-b border-[hsl(var(--border))] bg-[#fff7df] px-5 py-4 md:px-7"><div className="flex items-start gap-3"><div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--accent))]"><CircleHelp size={16} /></div><div><div className="text-sm font-bold">These settings stay on this device</div><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">ShiftPro never sends your rates anywhere. Change them whenever your contract does.</p></div></div></div><div className="grid gap-8 p-5 md:grid-cols-2 md:p-7">
-      <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Time rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">How your hours become paid hours</p></div><SettingField label="Standard duty hours" hint="Hours before overtime begins" suffix="hours"><input type="number" min="0.5" max="24" step="0.5" value={draft.dutyHours} onChange={(event) => update('dutyHours', Number(event.target.value))} className="shift-input pr-16" data-testid="input-duty-hours" /></SettingField><SettingField label="Break length" hint="Applied for each break count" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.breakMinutes} onChange={(event) => update('breakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-break-minutes" /></SettingField></div>
+       <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Time rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">How your hours become paid hours</p></div><SettingField label="Standard duty hours" hint="Hours before overtime begins" suffix="hours"><input type="number" min="0.5" max="24" step="0.5" value={draft.dutyHours} onChange={(event) => update('dutyHours', Number(event.target.value))} className="shift-input pr-16" data-testid="input-duty-hours" /></SettingField><SettingField label="Break length" hint="Applied for each break count" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.breakMinutes} onChange={(event) => update('breakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-break-minutes" /></SettingField><div className="border-t border-[hsl(var(--border))] pt-5"><h3 className="m-0 font-display text-lg font-bold">Company payroll month</h3><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">Use your company’s cycle, for example day 26 to day 25.</p><div className="mt-4 grid grid-cols-2 gap-3"><SettingField label="Starts on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleStartDay} onChange={(event) => update('payCycleStartDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-start" /></SettingField><SettingField label="Ends on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleEndDay} onChange={(event) => update('payCycleEndDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-end" /></SettingField></div></div></div>
       <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Pay rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">The rates behind your estimate</p></div><SettingField label="Regular hourly rate" hint="Your standard rate" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.hourlyRate} onChange={(event) => update('hourlyRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-hourly-rate" /></SettingField><SettingField label="Overtime hourly rate" hint="Applied after standard duty hours" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.overtimeRate} onChange={(event) => update('overtimeRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-overtime-rate" /></SettingField><SettingField label="Bonus per shift" hint="Optional fixed bonus added each time" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.bonusPerShift} onChange={(event) => update('bonusPerShift', Number(event.target.value))} className="shift-input pr-16" data-testid="input-bonus-rate" /></SettingField></div>
     </div><div className="flex items-center justify-end gap-3 border-t border-[hsl(var(--border))] bg-[hsl(var(--muted)/.35)] px-5 py-4 md:px-7"><span className="mr-auto hidden text-xs text-[hsl(var(--muted-foreground))] sm:block">Used for all new and existing shift estimates</span><button onClick={() => setDraft(settings)} className="rounded-xl px-3.5 py-2.5 text-sm font-bold text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-reset-settings">Reset</button><button onClick={save} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-white shadow-sm" data-testid="button-save-settings"><Check size={16} />Save rules</button></div></section>
     <section className="fade-up delay-2 grid gap-4 sm:grid-cols-3"><InfoTile icon={<Clock3 size={17} />} label="Regular time" value={`${draft.dutyHours}h`} /><InfoTile icon={<TrendingUp size={17} />} label="OT starts after" value={`${draft.dutyHours} hours`} /><InfoTile icon={<Banknote size={17} />} label="OT rate" value={formatMoney(draft.overtimeRate, draft.currency)} /></section>
