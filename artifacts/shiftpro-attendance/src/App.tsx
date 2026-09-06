@@ -1,0 +1,365 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { ErrorBoundary } from '@/components/error-boundary';
+import { Toaster } from '@/components/ui/toaster';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import {
+  AlarmClock, ArrowRight, Banknote, BriefcaseBusiness, CalendarDays,
+  Check, ChevronLeft, ChevronRight, CircleHelp, Clock3, Coffee, Edit3,
+  FileText, Gauge, LayoutDashboard, Menu, MoreHorizontal, Plus, Save,
+  Settings as SettingsIcon, Sparkles, Trash2, TrendingUp, X, Zap,
+} from 'lucide-react';
+import { Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
+
+type View = 'dashboard' | 'calendar' | 'settings';
+type Settings = {
+  dutyHours: number;
+  breakMinutes: number;
+  hourlyRate: number;
+  overtimeRate: number;
+  bonusPerShift: number;
+  currency: string;
+};
+type Shift = {
+  date: string;
+  entry: string;
+  exit: string;
+  breakCount: number;
+  manual: boolean;
+  manualAmount: number;
+  note: string;
+};
+type ComputedShift = Shift & {
+  totalMinutes: number;
+  paidMinutes: number;
+  regularMinutes: number;
+  overtimeMinutes: number;
+  pay: number;
+};
+
+const queryClient = new QueryClient();
+const STORAGE_SHIFTS = 'shiftpro-shifts-v1';
+const STORAGE_SETTINGS = 'shiftpro-settings-v1';
+const defaultSettings: Settings = {
+  dutyHours: 8,
+  breakMinutes: 30,
+  hourlyRate: 18.5,
+  overtimeRate: 27.75,
+  bonusPerShift: 0,
+  currency: '$',
+};
+
+function dateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+function dateFromKey(key: string) {
+  const [year, month, day] = key.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+function formatMoney(value: number, currency = '$') {
+  return `${currency}${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function minutesFromTime(time: string) {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+function formatDuration(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const mins = Math.round(minutes % 60);
+  return mins ? `${hours}h ${String(mins).padStart(2, '0')}m` : `${hours}h`;
+}
+function friendlyDate(key: string, year = false) {
+  return dateFromKey(key).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', ...(year ? { year: 'numeric' } : {}) });
+}
+function monthTitle(date: Date) {
+  return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+}
+function computeShift(shift: Shift, settings: Settings): ComputedShift {
+  let totalMinutes = minutesFromTime(shift.exit) - minutesFromTime(shift.entry);
+  if (totalMinutes < 0) totalMinutes += 24 * 60;
+  const paidMinutes = Math.max(0, totalMinutes - shift.breakCount * settings.breakMinutes);
+  const regularMinutes = Math.min(paidMinutes, settings.dutyHours * 60);
+  const overtimeMinutes = Math.max(0, paidMinutes - regularMinutes);
+  const calculatedPay = (regularMinutes / 60) * settings.hourlyRate
+    + (overtimeMinutes / 60) * settings.overtimeRate
+    + settings.bonusPerShift;
+  return { ...shift, totalMinutes, paidMinutes, regularMinutes, overtimeMinutes, pay: shift.manual && shift.manualAmount >= 0 ? shift.manualAmount : calculatedPay };
+}
+
+function useStoredData() {
+  const [settings, setSettings] = useState<Settings>(() => {
+    try { return { ...defaultSettings, ...JSON.parse(localStorage.getItem(STORAGE_SETTINGS) || '{}') }; } catch { return defaultSettings; }
+  });
+  const [shifts, setShifts] = useState<Record<string, Shift>>(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_SHIFTS) || '{}'); } catch { return {}; }
+  });
+  useEffect(() => { localStorage.setItem(STORAGE_SETTINGS, JSON.stringify(settings)); }, [settings]);
+  useEffect(() => { localStorage.setItem(STORAGE_SHIFTS, JSON.stringify(shifts)); }, [shifts]);
+  return { settings, setSettings, shifts, setShifts };
+}
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+          <Switch>
+            <Route path="/" component={Home} />
+            <Route path="/settings" component={Home} />
+            <Route path="/calendar" component={Home} />
+            <Route component={NotFound} />
+          </Switch>
+        </WouterRouter>
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+function Home() {
+  const [location, setLocation] = useLocation();
+  const storage = useStoredData();
+  const initialView: View = location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : 'dashboard';
+  const [view, setView] = useState<View>(initialView);
+  const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+  const [editorDate, setEditorDate] = useState<string | null>(null);
+  const [toast, setToast] = useState('');
+  const [mobileNav, setMobileNav] = useState(false);
+
+  useEffect(() => {
+    setView(location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : 'dashboard');
+  }, [location]);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(''), 2800);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+  const computedShifts = useMemo(() => Object.values(storage.shifts).map((shift) => computeShift(shift, storage.settings)), [storage.shifts, storage.settings]);
+  const now = new Date();
+  const monthPrefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
+  const monthShifts = computedShifts.filter((shift) => shift.date.startsWith(monthPrefix));
+  const currentMonthPay = monthShifts.reduce((sum, shift) => sum + shift.pay, 0);
+  const currentMonthMinutes = monthShifts.reduce((sum, shift) => sum + shift.paidMinutes, 0);
+  const currentMonthOvertime = monthShifts.reduce((sum, shift) => sum + shift.overtimeMinutes, 0);
+  const todayKey = dateKey(now);
+
+  function navigate(next: View) {
+    setView(next);
+    setMobileNav(false);
+    setLocation(next === 'dashboard' ? '/' : `/${next}`);
+  }
+  function saveShift(shift: Shift) {
+    storage.setShifts((existing) => ({ ...existing, [shift.date]: shift }));
+    setEditorDate(null);
+    setToast('Shift saved to your journal');
+  }
+  function deleteShift(key: string) {
+    storage.setShifts((existing) => {
+      const next = { ...existing };
+      delete next[key];
+      return next;
+    });
+    setEditorDate(null);
+    setToast('Shift removed');
+  }
+
+  return (
+    <div className="app-shell grain flex bg-[hsl(var(--background))]">
+      <aside className={`fixed inset-y-0 left-0 z-30 flex w-[248px] flex-col bg-[hsl(var(--sidebar))] px-5 py-6 text-[hsl(var(--sidebar-foreground))] transition-transform duration-300 md:relative md:translate-x-0 ${mobileNav ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="mb-12 flex items-center gap-3 px-2">
+          <div className="flex h-10 w-10 items-center justify-center rounded-[13px] bg-[hsl(var(--primary))] text-white shadow-lg shadow-orange-950/15"><Zap size={20} fill="currentColor" /></div>
+          <div>
+            <div className="font-display text-[21px] font-bold tracking-tight">Shift<span className="text-[hsl(var(--accent))]">Pro</span></div>
+            <div className="font-mono text-[9px] uppercase tracking-[.18em] text-slate-400">your shift journal</div>
+          </div>
+          <button onClick={() => setMobileNav(false)} className="ml-auto rounded-lg p-2 text-slate-400 hover:bg-white/10 md:hidden" data-testid="button-close-nav"><X size={18} /></button>
+        </div>
+        <div className="mb-3 px-3 font-mono text-[10px] uppercase tracking-[.18em] text-slate-500">Workspace</div>
+        <nav className="space-y-1.5">
+          <NavItem icon={<LayoutDashboard size={18} />} label="Overview" active={view === 'dashboard'} onClick={() => navigate('dashboard')} testId="nav-overview" />
+          <NavItem icon={<CalendarDays size={18} />} label="Shift calendar" active={view === 'calendar'} onClick={() => navigate('calendar')} testId="nav-calendar" />
+          <NavItem icon={<SettingsIcon size={18} />} label="Pay settings" active={view === 'settings'} onClick={() => navigate('settings')} testId="nav-settings" />
+        </nav>
+        <div className="mt-auto rounded-2xl border border-white/10 bg-white/[.055] p-4">
+          <div className="mb-2 flex items-center gap-2 text-[hsl(var(--accent))]"><Sparkles size={15} /><span className="font-mono text-[10px] uppercase tracking-[.12em]">Private by design</span></div>
+          <p className="m-0 text-xs leading-relaxed text-slate-400">Your shifts live only in this browser. No account, no upload, no fuss.</p>
+        </div>
+        <div className="mt-5 flex items-center gap-3 border-t border-white/10 px-2 pt-5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#d7e9ec] font-display font-bold text-[#265567]">Y</div>
+          <div><div className="text-sm font-semibold">Your journal</div><div className="font-mono text-[10px] text-slate-500">stored on device</div></div>
+        </div>
+      </aside>
+      {mobileNav && <button className="fixed inset-0 z-20 bg-slate-950/35 md:hidden" onClick={() => setMobileNav(false)} aria-label="Close navigation" data-testid="button-nav-backdrop" />}
+      <main className="mobile-scroll min-h-[100dvh] min-w-0 flex-1">
+        <header className="sticky top-0 z-10 flex h-[74px] items-center justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/.9)] px-5 backdrop-blur-md md:px-10">
+          <div className="flex items-center gap-3">
+            <button onClick={() => setMobileNav(true)} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-2.5 md:hidden" data-testid="button-open-nav"><Menu size={18} /></button>
+            <div className="md:hidden font-display text-lg font-bold">Shift<span className="text-[hsl(var(--primary))]">Pro</span></div>
+            <div className="hidden md:block">
+              <p className="m-0 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--muted-foreground))]">{view === 'dashboard' ? 'Your snapshot' : view === 'calendar' ? 'Your month at a glance' : 'Make the maths yours'}</p>
+              <h1 className="m-0 mt-0.5 font-display text-xl font-bold">{view === 'dashboard' ? 'Good morning, worker.' : view === 'calendar' ? 'Shift calendar' : 'Pay settings'}</h1>
+            </div>
+          </div>
+          <button onClick={() => { setEditorDate(todayKey); }} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-3.5 py-2.5 text-sm font-bold text-white shadow-[0_5px_15px_rgba(229,104,76,.25)] transition-transform hover:-translate-y-0.5" data-testid="button-log-shift-header"><Plus size={17} strokeWidth={2.5} /><span className="hidden sm:inline">Log a shift</span><span className="sm:hidden">Log</span></button>
+        </header>
+        <div className="mx-auto max-w-[1380px] px-5 py-7 md:px-10 md:py-9">
+          {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
+          {view === 'calendar' && <CalendarView month={month} setMonth={setMonth} shifts={computedShifts} todayKey={todayKey} onEdit={setEditorDate} onAdd={(key) => setEditorDate(key)} />}
+          {view === 'settings' && <SettingsView settings={storage.settings} setSettings={storage.setSettings} onSaved={() => setToast('Pay rules updated')} />}
+        </div>
+      </main>
+      <div className="fixed inset-x-0 bottom-0 z-10 flex border-t border-[hsl(var(--border))] bg-[hsl(var(--card)/.96)] px-3 py-2 backdrop-blur-lg md:hidden">
+        <MobileNav icon={<LayoutDashboard size={19} />} label="Overview" active={view === 'dashboard'} onClick={() => navigate('dashboard')} testId="mobile-nav-overview" />
+        <MobileNav icon={<CalendarDays size={19} />} label="Calendar" active={view === 'calendar'} onClick={() => navigate('calendar')} testId="mobile-nav-calendar" />
+        <MobileNav icon={<SettingsIcon size={19} />} label="Settings" active={view === 'settings'} onClick={() => navigate('settings')} testId="mobile-nav-settings" />
+      </div>
+      {editorDate && <ShiftEditor date={editorDate} existing={storage.shifts[editorDate]} settings={storage.settings} onSave={saveShift} onDelete={deleteShift} onClose={() => { setEditorDate(null); }} />}
+      {toast && <div className="fade-up fixed bottom-20 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2 rounded-xl bg-[hsl(var(--sidebar))] px-4 py-3 text-sm font-semibold text-white shadow-xl md:bottom-7" role="status" data-testid="status-toast"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#a8d9ac] text-[#234d35]"><Check size={13} strokeWidth={3} /></span>{toast}</div>}
+    </div>
+  );
+}
+
+function NavItem({ icon, label, active, onClick, testId }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void; testId: string }) {
+  return <button onClick={onClick} className={`nav-pill flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold ${active ? 'bg-[hsl(var(--primary))] text-white shadow-md shadow-black/10' : 'text-slate-400 hover:bg-white/[.07] hover:text-slate-100'}`} data-testid={testId}>{icon}<span>{label}</span>{active && <ArrowRight size={15} className="ml-auto opacity-70" />}</button>;
+}
+function MobileNav({ icon, label, active, onClick, testId }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void; testId: string }) {
+  return <button onClick={onClick} className={`flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 text-[10px] font-bold ${active ? 'text-[hsl(var(--primary))]' : 'text-[hsl(var(--muted-foreground))]'}`} data-testid={testId}>{icon}<span>{label}</span></button>;
+}
+
+function Dashboard({ settings, shifts, todayKey, month, monthPay, monthMinutes, monthOvertime, onAdd, onEdit, onCalendar }: { settings: Settings; shifts: ComputedShift[]; todayKey: string; month: Date; monthPay: number; monthMinutes: number; monthOvertime: number; onAdd: () => void; onEdit: (key: string) => void; onCalendar: () => void }) {
+  const today = shifts.find((shift) => shift.date === todayKey);
+  const monthPrefix = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}`;
+  const monthShifts = shifts.filter((shift) => shift.date.startsWith(monthPrefix)).sort((a, b) => b.date.localeCompare(a.date));
+  const daysWorked = monthShifts.length;
+  const expectedDays = Math.max(1, Math.min(new Date().getDate(), 22));
+  const progress = Math.min(100, Math.round((daysWorked / expectedDays) * 100));
+  return <div className="space-y-7">
+    <section className="fade-up relative overflow-hidden rounded-[24px] bg-[hsl(var(--sidebar))] px-6 py-7 text-white shadow-[0_16px_35px_rgba(37,43,60,.14)] md:px-9 md:py-9">
+      <div className="absolute -right-16 -top-24 h-72 w-72 rounded-full border-[26px] border-[hsl(var(--accent)/.14)]" />
+      <div className="absolute right-16 top-16 h-28 w-28 rounded-full bg-[hsl(var(--primary)/.14)] blur-2xl" />
+      <div className="relative max-w-xl">
+        <div className="mb-4 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--accent))]"><span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--accent))]" />{today ? 'Today is logged' : 'Your next payday starts here'}</div>
+        <h2 className="m-0 max-w-[560px] font-display text-[clamp(2rem,5vw,3.5rem)] font-bold leading-[.98] tracking-[-.045em]">{today ? `Nice work. ${formatMoney(today.pay, settings.currency)} is on the board.` : 'Turn every hour into a number you can trust.'}</h2>
+        <p className="mt-4 max-w-md text-sm leading-relaxed text-slate-300">{today ? `${formatDuration(today.paidMinutes)} paid today${today.overtimeMinutes ? `, including ${formatDuration(today.overtimeMinutes)} overtime.` : '.'}` : 'Log a shift and ShiftPro will split regular hours, overtime, breaks, and pay for you.'}</p>
+        {!today && <button onClick={onAdd} className="mt-6 flex items-center gap-2 rounded-xl bg-[hsl(var(--accent))] px-4 py-3 text-sm font-extrabold text-slate-900 transition-transform hover:-translate-y-0.5" data-testid="button-log-first-shift">Log today’s shift <ArrowRight size={17} /></button>}
+        {today && <button onClick={() => onEdit(todayKey)} className="mt-6 flex items-center gap-2 rounded-xl border border-white/20 px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10" data-testid="button-edit-today"><Edit3 size={15} /> Edit today</button>}
+      </div>
+      <div className="relative mt-9 flex flex-wrap gap-2 md:absolute md:bottom-8 md:right-9 md:mt-0 md:max-w-[310px] md:justify-end">
+        <span className="rounded-lg bg-white/10 px-3 py-2 font-mono text-[11px] text-slate-300">{daysWorked} {daysWorked === 1 ? 'day' : 'days'} logged this month</span>
+        <span className="rounded-lg bg-[hsl(var(--primary)/.25)] px-3 py-2 font-mono text-[11px] text-[#ffc9bb]">{formatMoney(monthPay, settings.currency)} earned</span>
+      </div>
+    </section>
+    <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <MetricCard label="This month" value={formatMoney(monthPay, settings.currency)} sub={monthPay ? 'estimated take-home' : 'nothing logged yet'} icon={<Banknote size={18} />} tone="coral" />
+      <MetricCard label="Paid hours" value={formatDuration(monthMinutes)} sub={`${daysWorked} logged ${daysWorked === 1 ? 'shift' : 'shifts'}`} icon={<Clock3 size={18} />} tone="teal" />
+      <MetricCard label="Overtime" value={formatDuration(monthOvertime)} sub={monthOvertime ? 'at your OT rate' : 'no overtime logged'} icon={<TrendingUp size={18} />} tone="yellow" />
+      <MetricCard label="Average shift" value={daysWorked ? formatMoney(monthPay / daysWorked, settings.currency) : formatMoney(0, settings.currency)} sub="per logged shift" icon={<Gauge size={18} />} tone="blue" />
+    </section>
+    <section className="grid gap-5 lg:grid-cols-[1.15fr_.85fr]">
+      <div className="fade-up delay-1 rounded-[20px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-5 shadow-[var(--shadow-sm)] md:p-6">
+        <div className="mb-6 flex items-start justify-between"><div><div className="flex items-center gap-2"><h3 className="m-0 font-display text-lg font-bold">Attendance rhythm</h3><span className="rounded-md bg-[#d8f0eb] px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[.1em] text-[#267163]">Live</span></div><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Logged days against the days you could have worked</p></div><button onClick={onCalendar} className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-view-calendar"><CalendarDays size={18} /></button></div>
+        <div className="flex items-end gap-5"><div className="flex h-32 w-32 shrink-0 items-center justify-center rounded-full" style={{ background: `conic-gradient(hsl(var(--primary)) ${progress}%, hsl(var(--muted)) ${progress}% 100%)` }}><div className="flex h-[104px] w-[104px] flex-col items-center justify-center rounded-full bg-[hsl(var(--card))]"><strong className="font-display text-3xl">{progress}%</strong><span className="font-mono text-[9px] uppercase tracking-widest text-[hsl(var(--muted-foreground))]">attendance</span></div></div><div className="min-w-0 pb-2"><div className="font-display text-2xl font-bold">{daysWorked} <span className="text-sm font-medium text-[hsl(var(--muted-foreground))]">days logged</span></div><p className="mt-2 max-w-[260px] text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">{daysWorked ? 'A strong trail of hours. Keep the streak honest and the payday clear.' : 'Your calendar is waiting for its first shift. Start with today.'}</p></div></div>
+      </div>
+      <div className="fade-up delay-2 rounded-[20px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-5 shadow-[var(--shadow-sm)] md:p-6">
+        <div className="mb-5 flex items-center justify-between"><div><h3 className="m-0 font-display text-lg font-bold">Recent shifts</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Your latest entries</p></div><FileText size={19} className="text-[hsl(var(--muted-foreground))]" /></div>
+        {monthShifts.length === 0 ? <EmptyMini onAdd={onAdd} /> : <div className="space-y-2">{monthShifts.slice(0, 4).map((shift) => <button key={shift.date} onClick={() => onEdit(shift.date)} className="group flex w-full items-center justify-between rounded-xl border border-transparent px-2 py-2.5 text-left transition-colors hover:border-[hsl(var(--border))] hover:bg-[hsl(var(--muted)/.65)]" data-testid={`row-recent-shift-${shift.date}`}><div className="flex min-w-0 items-center gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#dff0ef] text-[#34736e]"><BriefcaseBusiness size={16} /></div><div className="min-w-0"><div className="truncate text-sm font-bold">{dateFromKey(shift.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}</div><div className="font-mono text-[10px] text-[hsl(var(--muted-foreground))]">{shift.entry} – {shift.exit} · {formatDuration(shift.paidMinutes)}</div></div></div><span className="font-mono text-sm font-medium">{formatMoney(shift.pay, settings.currency)}</span></button>)}</div>}
+      </div>
+    </section>
+  </div>;
+}
+
+function MetricCard({ label, value, sub, icon, tone }: { label: string; value: string; sub: string; icon: React.ReactNode; tone: string }) {
+  const colors: Record<string, string> = { coral: 'bg-[#fde3dc] text-[#c65241]', teal: 'bg-[#d9efeb] text-[#34776f]', yellow: 'bg-[#fff0bd] text-[#9b7422]', blue: 'bg-[#dce8f1] text-[#39627a]' };
+  return <div className="fade-up rounded-[18px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-4 shadow-[var(--shadow-sm)]"><div className="mb-4 flex items-center justify-between"><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{label}</span><span className={`flex h-8 w-8 items-center justify-center rounded-lg ${colors[tone]}`}>{icon}</span></div><div className="font-display text-[25px] font-bold tracking-tight">{value}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{sub}</div></div>;
+}
+function EmptyMini({ onAdd }: { onAdd: () => void }) {
+  return <div className="rounded-xl bg-[hsl(var(--muted)/.65)] px-4 py-5 text-center"><div className="mx-auto mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-[hsl(var(--accent))] text-slate-800"><Plus size={18} /></div><p className="m-0 text-sm font-semibold">No shifts this month</p><button onClick={onAdd} className="mt-2 text-xs font-bold text-[hsl(var(--primary))] hover:underline" data-testid="button-empty-add-shift">Add your first shift</button></div>;
+}
+
+function CalendarView({ month, setMonth, shifts, todayKey, onEdit, onAdd }: { month: Date; setMonth: (date: Date) => void; shifts: ComputedShift[]; todayKey: string; onEdit: (key: string) => void; onAdd: (key: string) => void }) {
+  const firstDay = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
+  const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const cells = Array.from({ length: 42 }, (_, index) => {
+    const day = index - firstDay + 1;
+    return day > 0 && day <= daysInMonth ? new Date(month.getFullYear(), month.getMonth(), day) : null;
+  });
+  const byDate = useMemo(() => Object.fromEntries(shifts.map((shift) => [shift.date, shift])), [shifts]);
+  return <div className="space-y-6">
+    <section className="fade-up flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]"><CalendarDays size={14} /> Shift ledger</div><h2 className="m-0 font-display text-3xl font-bold tracking-tight md:text-4xl">Every day has a story.</h2><p className="mt-2 max-w-lg text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">Tap a date to jot down a shift, revisit the maths, or leave a note for future you.</p></div><div className="flex items-center gap-2"><button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-2.5 hover:bg-[hsl(var(--muted))]" data-testid="button-calendar-prev"><ChevronLeft size={18} /></button><div className="min-w-[145px] text-center font-display text-base font-bold">{monthTitle(month)}</div><button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-2.5 hover:bg-[hsl(var(--muted))]" data-testid="button-calendar-next"><ChevronRight size={18} /></button></div></section>
+    <section className="fade-up delay-1 overflow-hidden rounded-[20px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-3 shadow-[var(--shadow-sm)] md:p-6">
+      <div className="grid grid-cols-7 border-b border-[hsl(var(--border))] pb-3">{['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <div key={day} className="text-center font-mono text-[9px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))] sm:text-[10px]">{day}</div>)}</div>
+      <div className="grid grid-cols-7 gap-1.5 pt-3 sm:gap-2">{cells.map((cell, index) => {
+        if (!cell) return <div key={`blank-${index}`} className="min-h-[86px] rounded-xl bg-[hsl(var(--muted)/.28)] sm:min-h-[117px]" />;
+        const key = dateKey(cell);
+        const shift = byDate[key];
+        const isToday = key === todayKey;
+        return <button key={key} onClick={() => shift ? onEdit(key) : onAdd(key)} className={`calendar-cell group relative flex min-h-[86px] flex-col items-start rounded-xl border p-2 text-left sm:min-h-[117px] sm:p-3 ${isToday ? 'border-[hsl(var(--primary))] bg-[#fff0e9]' : 'border-[hsl(var(--border)/.65)] bg-[hsl(var(--card))] hover:border-[hsl(var(--primary)/.55)]'} ${shift ? 'shadow-[inset_0_-3px_0_hsl(var(--primary)/.8)]' : ''}`} data-testid={`calendar-day-${key}`}><span className={`font-mono text-[11px] ${isToday ? 'font-bold text-[hsl(var(--primary))]' : 'text-[hsl(var(--muted-foreground))]'}`}>{cell.getDate()}</span>{isToday && <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-[hsl(var(--primary))]" />}{shift ? <><span className="mt-auto flex w-full items-center gap-1.5 truncate text-[10px] font-bold text-[hsl(var(--foreground))] sm:text-xs"><span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#64b29e]" />{formatMoney(shift.pay)}</span><span className="mt-0.5 hidden font-mono text-[9px] text-[hsl(var(--muted-foreground))] sm:block">{formatDuration(shift.paidMinutes)}{shift.overtimeMinutes ? ` · ${formatDuration(shift.overtimeMinutes)} OT` : ''}</span></> : <span className="mt-auto hidden text-[9px] font-semibold text-[hsl(var(--muted-foreground))] opacity-0 transition-opacity group-hover:opacity-100 sm:block">Add shift</span>}</button>;
+      })}</div>
+      <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 border-t border-[hsl(var(--border))] pt-4 text-[10px] text-[hsl(var(--muted-foreground))]"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#64b29e]" />Logged shift</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[hsl(var(--primary))]" />Today</span><span className="ml-auto hidden sm:block">Stored on this device</span></div>
+    </section>
+  </div>;
+}
+
+function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { date: string; existing?: Shift; settings: Settings; onSave: (shift: Shift) => void; onDelete: (key: string) => void; onClose: () => void }) {
+  const [entry, setEntry] = useState(existing?.entry || '09:00');
+  const [exit, setExit] = useState(existing?.exit || '17:00');
+  const [breakCount, setBreakCount] = useState(existing?.breakCount ?? 1);
+  const [manual, setManual] = useState(existing?.manual || false);
+  const [manualAmount, setManualAmount] = useState(existing?.manualAmount?.toString() || '');
+  const [note, setNote] = useState(existing?.note || '');
+  const [error, setError] = useState('');
+  const panelRef = useRef<HTMLDivElement>(null);
+  const preview = computeShift({ date, entry, exit, breakCount, manual, manualAmount: Number(manualAmount) || 0, note }, settings);
+  useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, []);
+  function save() {
+    const total = minutesFromTime(exit) - minutesFromTime(entry) + (minutesFromTime(exit) <= minutesFromTime(entry) ? 1440 : 0);
+    if (!entry || !exit) { setError('Add both an entry and exit time.'); return; }
+    if (total <= breakCount * settings.breakMinutes) { setError('Your break time cannot be longer than this shift.'); return; }
+    if (manual && (!manualAmount || Number(manualAmount) < 0)) { setError('Add the manual amount you want to use.'); return; }
+    onSave({ date, entry, exit, breakCount, manual, manualAmount: Number(manualAmount) || 0, note: note.trim() });
+  }
+  const labelDate = friendlyDate(date, true);
+  return <div className="fixed inset-0 z-40 flex items-end justify-center bg-slate-950/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className="fade-up max-h-[92dvh] w-full overflow-y-auto rounded-t-[25px] border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-2xl sm:max-w-[540px] sm:rounded-[25px]">
+    <div className="sticky top-0 z-10 flex items-start justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--card)/.96)] px-5 py-5 backdrop-blur-md md:px-7"><div><div className="mb-1 font-mono text-[10px] uppercase tracking-[.16em] text-[hsl(var(--primary))]">{existing ? 'Edit logged shift' : 'New shift entry'}</div><h2 className="m-0 font-display text-2xl font-bold">{labelDate}</h2></div><button onClick={onClose} className="rounded-xl p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-close-editor"><X size={19} /></button></div>
+    <div className="space-y-5 px-5 py-6 md:px-7">
+      <div className="grid grid-cols-2 gap-3"><TimeField label="Entry" value={entry} onChange={setEntry} testId="input-entry-time" /><TimeField label="Exit" value={exit} onChange={setExit} testId="input-exit-time" /></div>
+      <div className="rounded-2xl bg-[hsl(var(--muted)/.65)] p-4"><div className="mb-3 flex items-center justify-between"><label className="flex items-center gap-2 text-sm font-bold"><Coffee size={16} className="text-[hsl(var(--primary))]" />Breaks taken</label><span className="font-mono text-[10px] text-[hsl(var(--muted-foreground))]">{settings.breakMinutes} min each</span></div><div className="flex items-center justify-between"><span className="text-xs text-[hsl(var(--muted-foreground))]">Unpaid breaks during this shift</span><div className="flex items-center gap-3"><button onClick={() => setBreakCount(Math.max(0, breakCount - 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-decrease">−</button><span className="w-5 text-center font-mono font-medium" data-testid="text-break-count">{breakCount}</span><button onClick={() => setBreakCount(Math.min(8, breakCount + 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-increase">+</button></div></div></div>
+      <div className="grid grid-cols-3 gap-2 rounded-2xl border border-[hsl(var(--border))] bg-[#fffaf0] p-3 text-center"><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Paid time</div><strong className="mt-1 block font-display text-lg">{formatDuration(preview.paidMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Regular</div><strong className="mt-1 block font-display text-lg">{formatDuration(preview.regularMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Est. pay</div><strong className="mt-1 block font-display text-lg text-[hsl(var(--primary))]">{formatMoney(preview.pay, settings.currency)}</strong></div></div>
+      {preview.overtimeMinutes > 0 && <div className="flex items-center gap-2 rounded-xl bg-[#fff0bd] px-3 py-2.5 text-xs font-semibold text-[#7a5b1b]"><TrendingUp size={15} />{formatDuration(preview.overtimeMinutes)} will be paid at your overtime rate.</div>}
+      <div><label className="mb-2 block text-sm font-bold" htmlFor="shift-note">Note <span className="font-normal text-[hsl(var(--muted-foreground))]">(optional)</span></label><textarea id="shift-note" value={note} onChange={(event) => setNote(event.target.value)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input min-h-[74px] resize-none" placeholder="Late close, split shift, good tips…" data-testid="input-shift-note" /></div>
+      <div className="rounded-xl border border-[hsl(var(--border))] px-3.5 py-3"><div className="flex items-center justify-between gap-3"><div><div className="text-sm font-bold">Use a manual total</div><div className="mt-0.5 text-[11px] text-[hsl(var(--muted-foreground))]">For payslips or a manager-approved amount</div></div><button onClick={() => setManual(!manual)} className={`relative h-6 w-11 rounded-full transition-colors ${manual ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--border))]'}`} aria-pressed={manual} data-testid="button-toggle-manual-pay"><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${manual ? 'left-6' : 'left-1'}`} /></button></div>{manual && <div className="mt-3"><label className="mb-1.5 block text-xs font-bold" htmlFor="manual-total">Amount ({settings.currency})</label><input id="manual-total" type="number" min="0" step="0.01" value={manualAmount} onChange={(event) => setManualAmount(event.target.value)} className="shift-input" placeholder="0.00" data-testid="input-manual-amount" /></div>}</div>
+      {error && <div className="rounded-xl bg-[#fbe1dd] px-3 py-2.5 text-xs font-semibold text-[#a83c33]" role="alert" data-testid="status-editor-error">{error}</div>}
+      <div className="flex gap-2.5 pt-1"><button onClick={save} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-3.5 text-sm font-bold text-white shadow-md shadow-orange-950/10 transition-transform hover:-translate-y-0.5" data-testid="button-save-shift"><Save size={16} /> Save shift</button>{existing && <button onClick={() => { if (window.confirm('Remove this shift from your journal?')) onDelete(date); }} className="rounded-xl border border-[#f0c8c2] px-4 text-[#b34a40] hover:bg-[#fbe8e5]" data-testid="button-delete-shift"><Trash2 size={17} /></button>}</div>
+    </div>
+  </div></div>;
+}
+function TimeField({ label, value, onChange, testId }: { label: string; value: string; onChange: (value: string) => void; testId: string }) {
+  return <div><label className="mb-2 block text-sm font-bold">{label}</label><div className="relative"><AlarmClock size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[hsl(var(--muted-foreground))]" /><input type="time" value={value} onChange={(event) => onChange(event.target.value)} onFocus={(event) => event.currentTarget.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="shift-input pl-10 font-mono" data-testid={testId} /></div></div>;
+}
+
+function SettingsView({ settings, setSettings, onSaved }: { settings: Settings; setSettings: (value: Settings | ((previous: Settings) => Settings)) => void; onSaved: () => void }) {
+  const [draft, setDraft] = useState(settings);
+  useEffect(() => setDraft(settings), [settings]);
+  function update<K extends keyof Settings>(key: K, value: Settings[K]) { setDraft((current) => ({ ...current, [key]: value })); }
+  function save() { if (draft.dutyHours <= 0 || draft.breakMinutes < 0 || draft.hourlyRate < 0 || draft.overtimeRate < 0 || draft.bonusPerShift < 0) return; setSettings(draft); onSaved(); }
+  return <div className="mx-auto max-w-[900px] space-y-7">
+    <section className="fade-up"><div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]"><SettingsIcon size={14} /> Personal rules</div><h2 className="m-0 font-display text-3xl font-bold tracking-tight md:text-4xl">Make the maths yours.</h2><p className="mt-2 max-w-xl text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">Set the rules from your contract or payslip. Every shift will use these numbers instantly.</p></section>
+    <section className="fade-up delay-1 overflow-hidden rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] shadow-[var(--shadow-sm)]"><div className="border-b border-[hsl(var(--border))] bg-[#fff7df] px-5 py-4 md:px-7"><div className="flex items-start gap-3"><div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--accent))]"><CircleHelp size={16} /></div><div><div className="text-sm font-bold">These settings stay on this device</div><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">ShiftPro never sends your rates anywhere. Change them whenever your contract does.</p></div></div></div><div className="grid gap-8 p-5 md:grid-cols-2 md:p-7">
+      <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Time rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">How your hours become paid hours</p></div><SettingField label="Standard duty hours" hint="Hours before overtime begins" suffix="hours"><input type="number" min="0.5" max="24" step="0.5" value={draft.dutyHours} onChange={(event) => update('dutyHours', Number(event.target.value))} className="shift-input pr-16" data-testid="input-duty-hours" /></SettingField><SettingField label="Break length" hint="Applied for each break count" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.breakMinutes} onChange={(event) => update('breakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-break-minutes" /></SettingField></div>
+      <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Pay rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">The rates behind your estimate</p></div><SettingField label="Regular hourly rate" hint="Your standard rate" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.hourlyRate} onChange={(event) => update('hourlyRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-hourly-rate" /></SettingField><SettingField label="Overtime hourly rate" hint="Applied after standard duty hours" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.overtimeRate} onChange={(event) => update('overtimeRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-overtime-rate" /></SettingField><SettingField label="Bonus per shift" hint="Optional fixed bonus added each time" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.bonusPerShift} onChange={(event) => update('bonusPerShift', Number(event.target.value))} className="shift-input pr-16" data-testid="input-bonus-rate" /></SettingField></div>
+    </div><div className="flex items-center justify-end gap-3 border-t border-[hsl(var(--border))] bg-[hsl(var(--muted)/.35)] px-5 py-4 md:px-7"><span className="mr-auto hidden text-xs text-[hsl(var(--muted-foreground))] sm:block">Used for all new and existing shift estimates</span><button onClick={() => setDraft(settings)} className="rounded-xl px-3.5 py-2.5 text-sm font-bold text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-reset-settings">Reset</button><button onClick={save} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-white shadow-sm" data-testid="button-save-settings"><Check size={16} />Save rules</button></div></section>
+    <section className="fade-up delay-2 grid gap-4 sm:grid-cols-3"><InfoTile icon={<Clock3 size={17} />} label="Regular time" value={`${draft.dutyHours}h`} /><InfoTile icon={<TrendingUp size={17} />} label="OT starts after" value={`${draft.dutyHours} hours`} /><InfoTile icon={<Banknote size={17} />} label="OT rate" value={formatMoney(draft.overtimeRate, draft.currency)} /></section>
+  </div>;
+}
+function SettingField({ label, hint, suffix, children }: { label: string; hint: string; suffix: string; children: React.ReactNode }) {
+  return <div><label className="mb-2 block text-sm font-bold">{label}</label><div className="relative">{children}<span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 font-mono text-[10px] uppercase tracking-[.08em] text-[hsl(var(--muted-foreground))]">{suffix}</span></div><div className="mt-1.5 text-[11px] text-[hsl(var(--muted-foreground))]">{hint}</div></div>;
+}
+function InfoTile({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return <div className="rounded-2xl border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-4 shadow-[var(--shadow-sm)]"><div className="mb-3 flex h-8 w-8 items-center justify-center rounded-lg bg-[#dce8f1] text-[#39627a]">{icon}</div><div className="font-mono text-[10px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">{label}</div><div className="mt-1 font-display text-xl font-bold">{value}</div></div>;
+}
+
+function NotFound() {
+  return <div className="flex min-h-[100dvh] items-center justify-center bg-[hsl(var(--background))] p-6 text-center"><div><div className="font-display text-6xl font-bold text-[hsl(var(--primary))]">404</div><h1 className="mt-3 font-display text-2xl font-bold">That page wandered off shift.</h1><p className="mt-2 text-sm text-[hsl(var(--muted-foreground))]">Head back to your overview to keep logging.</p><a href="/" className="mt-6 inline-flex rounded-xl bg-[hsl(var(--primary))] px-4 py-3 text-sm font-bold text-white">Back to overview</a></div></div>;
+}
+
+export default App;

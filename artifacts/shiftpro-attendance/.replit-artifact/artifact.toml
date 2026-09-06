@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "ShiftPro Attendance & Payroll Tracker"
+description = "A colorful, mobile-first attendance and payroll tracker that keeps shift logs, settings, calculations, and calendar history on the user's device without requiring login."
+version = "1.0.0"
+id = "artifacts/shiftpro-attendance"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23751
+
+[services.development]
+run = "pnpm --filter @workspace/shiftpro-attendance run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/shiftpro-attendance", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/shiftpro-attendance/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23751"
+BASE_PATH = "/"
