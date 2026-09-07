@@ -120,3 +120,8 @@ button { cursor: pointer; }
 @media (max-width: 767px) {
   .mobile-scroll { padding-bottom: 6.5rem; }
 }
+@media print {
+  .no-print { display: none !important; }
+  .report-paper { box-shadow: none !important; }
+  body { background: #fff !important; }
+}

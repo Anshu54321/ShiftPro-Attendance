@@ -6,12 +6,12 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import {
   AlarmClock, ArrowRight, Banknote, CalendarDays,
   Check, ChevronLeft, ChevronRight, CircleHelp, Clock3, Coffee, Edit3,
-  Gauge, LayoutDashboard, Menu, Moon, Plus, Save, Settings as SettingsIcon,
+  FileText, Gauge, LayoutDashboard, Menu, Moon, Plus, Save, Settings as SettingsIcon,
   Sparkles, Sun, Trash2, TrendingUp, X, Zap,
 } from 'lucide-react';
 import { Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 
-type View = 'dashboard' | 'calendar' | 'settings';
+type View = 'dashboard' | 'calendar' | 'report' | 'settings';
 type ShiftType = 'morning' | 'general' | 'night';
 type Settings = {
   dutyHours: number;
@@ -211,6 +211,7 @@ function App() {
             <Route path="/" component={Home} />
             <Route path="/settings" component={Home} />
             <Route path="/calendar" component={Home} />
+            <Route path="/report" component={Home} />
             <Route component={NotFound} />
           </Switch>
         </WouterRouter>
@@ -223,7 +224,7 @@ function App() {
 function Home() {
   const [location, setLocation] = useLocation();
   const storage = useStoredData();
-  const initialView: View = location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : 'dashboard';
+  const initialView: View = location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : location === '/report' ? 'report' : 'dashboard';
   const [view, setView] = useState<View>(initialView);
   const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [editorDate, setEditorDate] = useState<string | null>(null);
@@ -231,7 +232,7 @@ function Home() {
   const [mobileNav, setMobileNav] = useState(false);
 
   useEffect(() => {
-    setView(location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : 'dashboard');
+    setView(location === '/settings' ? 'settings' : location === '/calendar' ? 'calendar' : location === '/report' ? 'report' : 'dashboard');
   }, [location]);
   useEffect(() => {
     if (!toast) return;
@@ -273,7 +274,7 @@ function Home() {
 
   return (
     <div className="app-shell grain flex bg-[hsl(var(--background))]">
-      <aside className={`fixed inset-y-0 left-0 z-30 flex w-[248px] flex-col bg-[hsl(var(--sidebar))] px-5 py-6 text-[hsl(var(--sidebar-foreground))] transition-transform duration-300 md:relative md:translate-x-0 ${mobileNav ? 'translate-x-0' : '-translate-x-full'}`}>
+      <aside className={`no-print fixed inset-y-0 left-0 z-30 flex w-[248px] flex-col bg-[hsl(var(--sidebar))] px-5 py-6 text-[hsl(var(--sidebar-foreground))] transition-transform duration-300 md:relative md:translate-x-0 ${mobileNav ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="mb-12 flex items-center gap-3 px-2">
           <div className="flex h-10 w-10 items-center justify-center rounded-[13px] bg-[hsl(var(--primary))] text-white shadow-lg shadow-orange-950/15"><Zap size={20} fill="currentColor" /></div>
           <div>
@@ -286,6 +287,7 @@ function Home() {
         <nav className="space-y-1.5">
           <NavItem icon={<LayoutDashboard size={18} />} label="Overview" active={view === 'dashboard'} onClick={() => navigate('dashboard')} testId="nav-overview" />
            <NavItem icon={<CalendarDays size={18} />} label="Attendance calendar" active={view === 'calendar'} onClick={() => navigate('calendar')} testId="nav-calendar" />
+           <NavItem icon={<FileText size={18} />} label="Duty report" active={view === 'report'} onClick={() => navigate('report')} testId="nav-report" />
           <NavItem icon={<SettingsIcon size={18} />} label="Pay settings" active={view === 'settings'} onClick={() => navigate('settings')} testId="nav-settings" />
         </nav>
         <div className="mt-auto rounded-2xl border border-white/10 bg-white/[.055] p-4">
@@ -299,13 +301,13 @@ function Home() {
       </aside>
       {mobileNav && <button className="fixed inset-0 z-20 bg-slate-950/35 md:hidden" onClick={() => setMobileNav(false)} aria-label="Close navigation" data-testid="button-nav-backdrop" />}
       <main className="mobile-scroll min-h-[100dvh] min-w-0 flex-1">
-        <header className="sticky top-0 z-10 flex h-[74px] items-center justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/.9)] px-5 backdrop-blur-md md:px-10">
+        <header className="no-print sticky top-0 z-10 flex h-[74px] items-center justify-between border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/.9)] px-5 backdrop-blur-md md:px-10">
           <div className="flex items-center gap-3">
             <button onClick={() => setMobileNav(true)} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-2.5 md:hidden" data-testid="button-open-nav"><Menu size={18} /></button>
             <div className="md:hidden font-display text-lg font-bold">Shift<span className="text-[hsl(var(--primary))]">Pro</span></div>
-            <div className="hidden md:block">
-              <p className="m-0 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--muted-foreground))]">{view === 'dashboard' ? 'Your snapshot' : view === 'calendar' ? 'Your month at a glance' : 'Make the maths yours'}</p>
-              <h1 className="m-0 mt-0.5 font-display text-xl font-bold">{view === 'dashboard' ? 'Good morning, worker.' : view === 'calendar' ? 'Attendance calendar' : 'Pay settings'}</h1>
+             <div className="hidden md:block">
+               <p className="m-0 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--muted-foreground))]">{view === 'dashboard' ? 'Your snapshot' : view === 'calendar' ? 'Your month at a glance' : view === 'report' ? 'Shareable attendance record' : 'Make the maths yours'}</p>
+               <h1 className="m-0 mt-0.5 font-display text-xl font-bold">{view === 'dashboard' ? 'Good morning, worker.' : view === 'calendar' ? 'Attendance calendar' : view === 'report' ? 'Duty report' : 'Pay settings'}</h1>
             </div>
           </div>
           <button onClick={() => { setEditorDate(todayKey); }} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-3.5 py-2.5 text-sm font-bold text-white shadow-[0_5px_15px_rgba(229,104,76,.25)] transition-transform hover:-translate-y-0.5" data-testid="button-log-shift-header"><Plus size={17} strokeWidth={2.5} /><span className="hidden sm:inline">Log a shift</span><span className="sm:hidden">Log</span></button>
@@ -313,12 +315,14 @@ function Home() {
         <div className="mx-auto max-w-[1380px] px-5 py-7 md:px-10 md:py-9">
           {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} payrollPeriod={payrollPeriod} attendanceSummary={attendanceSummary} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onPreviousPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNextPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
           {view === 'calendar' && <CalendarView month={month} setMonth={setMonth} shifts={computedShifts} settings={storage.settings} todayKey={todayKey} onEdit={setEditorDate} onAdd={(key) => setEditorDate(key)} />}
+           {view === 'report' && <ReportView month={month} setMonth={setMonth} shifts={computedShifts} settings={storage.settings} payrollPeriod={payrollPeriod} onAdd={() => setEditorDate(todayKey)} />}
           {view === 'settings' && <SettingsView settings={storage.settings} setSettings={storage.setSettings} onSaved={() => setToast('Pay rules updated')} />}
         </div>
       </main>
-      <div className="fixed inset-x-0 bottom-0 z-10 flex border-t border-[hsl(var(--border))] bg-[hsl(var(--card)/.96)] px-3 py-2 backdrop-blur-lg md:hidden">
+       <div className="no-print fixed inset-x-0 bottom-0 z-10 flex border-t border-[hsl(var(--border))] bg-[hsl(var(--card)/.96)] px-3 py-2 backdrop-blur-lg md:hidden">
         <MobileNav icon={<LayoutDashboard size={19} />} label="Overview" active={view === 'dashboard'} onClick={() => navigate('dashboard')} testId="mobile-nav-overview" />
         <MobileNav icon={<CalendarDays size={19} />} label="Calendar" active={view === 'calendar'} onClick={() => navigate('calendar')} testId="mobile-nav-calendar" />
+         <MobileNav icon={<FileText size={19} />} label="Report" active={view === 'report'} onClick={() => navigate('report')} testId="mobile-nav-report" />
         <MobileNav icon={<SettingsIcon size={19} />} label="Settings" active={view === 'settings'} onClick={() => navigate('settings')} testId="mobile-nav-settings" />
       </div>
       {editorDate && <ShiftEditor date={editorDate} existing={storage.shifts[editorDate]} settings={storage.settings} onSave={saveShift} onDelete={deleteShift} onClose={() => { setEditorDate(null); }} />}
@@ -442,6 +446,61 @@ function CalendarView({ month, setMonth, shifts, settings, todayKey, onEdit, onA
       <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 border-t border-[hsl(var(--border))] pt-4 text-[10px] text-[hsl(var(--muted-foreground))]"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#d94f49]" />Holiday</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#4aaa83]" />Day</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#1a9b69]" />Day + OT (darker = more)</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#8a61bd]" />Night</span><span className="ml-auto hidden sm:block">Stored on this device</span></div>
     </section>
   </div>;
+}
+
+function ReportView({ month, setMonth, shifts, settings, payrollPeriod, onAdd }: { month: Date; setMonth: (date: Date) => void; shifts: ComputedShift[]; settings: Settings; payrollPeriod: { start: Date; end: Date }; onAdd: () => void }) {
+  const periodShifts = useMemo(() => shifts.filter((shift) => {
+    const date = dateFromKey(shift.date);
+    return date >= payrollPeriod.start && date <= payrollPeriod.end;
+  }).sort((a, b) => a.date.localeCompare(b.date)), [shifts, payrollPeriod]);
+  const dutyMinutes = periodShifts.reduce((sum, shift) => sum + shift.regularMinutes, 0);
+  const overtimeMinutes = periodShifts.reduce((sum, shift) => sum + shift.overtimeMinutes, 0);
+  function downloadCsv() {
+    const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const rows = [
+      ['Date', 'Day', 'Shift', 'Entry', 'Exit', 'Duty hours', 'Overtime hours'],
+      ...periodShifts.map((shift) => {
+        const date = dateFromKey(shift.date);
+        return [
+          date.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' }),
+          date.toLocaleDateString(undefined, { weekday: 'long' }),
+          shiftTypeLabel(shift.shiftType),
+          formatTime12(shift.entry),
+          formatTime12(shift.exit),
+          formatDuration(shift.regularMinutes),
+          formatDuration(shift.overtimeMinutes),
+        ];
+      }),
+    ];
+    const csv = rows.map((row) => row.map(escape).join(',')).join('\n');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    link.download = `shiftpro-duty-report-${dateKey(payrollPeriod.start)}-to-${dateKey(payrollPeriod.end)}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+  return <div className="report-paper space-y-6">
+    <section className="fade-up flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+      <div><div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]"><FileText size={14} /> Company-ready attendance report</div><h2 className="m-0 font-display text-3xl font-bold tracking-tight md:text-4xl">Duty, clearly recorded.</h2><p className="mt-2 max-w-xl text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">Only attendance timings, duty hours, and overtime are shown. Earnings are intentionally excluded.</p></div>
+      <div className="no-print flex gap-2"><button onClick={downloadCsv} className="flex items-center gap-2 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3.5 py-2.5 text-sm font-bold hover:bg-[hsl(var(--muted))]" data-testid="button-download-report"><FileText size={16} /> Download CSV</button><button onClick={() => window.print()} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-3.5 py-2.5 text-sm font-bold text-white shadow-sm hover:-translate-y-0.5" data-testid="button-print-report"><Save size={16} /> Print report</button></div>
+    </section>
+    <section className="fade-up flex flex-col justify-between gap-4 rounded-2xl border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] px-4 py-4 shadow-[var(--shadow-sm)] sm:flex-row sm:items-center md:px-5">
+      <div><div className="font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]">Selected payroll month</div><div className="mt-1 font-display text-xl font-bold">{payrollPeriodLabel(payrollPeriod)}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Company cycle: day {settings.payCycleStartDay} to day {settings.payCycleEndDay}</div></div>
+      <div className="no-print flex items-center gap-2"><button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-2.5 hover:bg-[hsl(var(--muted))]" aria-label="Previous report month" data-testid="button-report-prev"><ChevronLeft size={18} /></button><div className="min-w-[110px] text-center font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{monthTitle(month)}</div><button onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-2.5 hover:bg-[hsl(var(--muted))]" aria-label="Next report month" data-testid="button-report-next"><ChevronRight size={18} /></button></div>
+    </section>
+    <section className="grid gap-3 sm:grid-cols-3">
+      <ReportStat label="Days logged" value={String(periodShifts.length)} detail="attendance entries" />
+      <ReportStat label="Duty time" value={formatDuration(dutyMinutes)} detail="regular duty hours" />
+      <ReportStat label="Overtime" value={formatDuration(overtimeMinutes)} detail="extra hours" />
+    </section>
+    <section className="fade-up overflow-hidden rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] shadow-[var(--shadow-sm)]">
+      <div className="flex items-center justify-between border-b border-[hsl(var(--border))] px-5 py-4 md:px-6"><div><h3 className="m-0 font-display text-xl font-bold">Attendance details</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Entry and exit times are shown in AM / PM format.</p></div><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{periodShifts.length} rows</span></div>
+      {periodShifts.length === 0 ? <div className="px-5 py-14 text-center md:px-6"><div className="mx-auto mb-3 flex h-11 w-11 items-center justify-center rounded-full bg-[hsl(var(--accent))]"><FileText size={19} /></div><h3 className="m-0 font-display text-lg font-bold">No attendance logged for this period</h3><p className="mx-auto mt-2 max-w-sm text-sm text-[hsl(var(--muted-foreground))]">Add a day to build a clean report for your company.</p><button onClick={onAdd} className="mt-4 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-white" data-testid="button-report-add-day">Log a day</button></div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] border-collapse text-left"><thead><tr className="border-b border-[hsl(var(--border))] bg-[hsl(var(--muted)/.45)]">{['Date', 'Day', 'Shift', 'Entry', 'Exit', 'Duty', 'Overtime'].map((heading) => <th key={heading} className="px-5 py-3 font-mono text-[10px] uppercase tracking-[.13em] text-[hsl(var(--muted-foreground))]">{heading}</th>)}</tr></thead><tbody>{periodShifts.map((shift) => { const date = dateFromKey(shift.date); const offDay = isCompanyOffDay(shift.date, settings) || shift.isHoliday; return <tr key={shift.date} className="border-b border-[hsl(var(--border)/.7)] last:border-0 hover:bg-[hsl(var(--muted)/.3)]"><td className="px-5 py-4 font-semibold">{date.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })}</td><td className="px-5 py-4 text-sm text-[hsl(var(--muted-foreground))]">{date.toLocaleDateString(undefined, { weekday: 'long' })}</td><td className="px-5 py-4"><div className="font-semibold">{shiftTypeLabel(shift.shiftType)}</div><div className={`mt-1 text-[10px] font-bold uppercase tracking-[.1em] ${offDay ? 'text-[#ad3935]' : 'text-[hsl(var(--muted-foreground))]'}`}>{shift.isHoliday ? 'Holiday' : offDay ? 'Company off-day' : 'Regular day'}</div></td><td className="px-5 py-4 font-mono text-sm">{formatTime12(shift.entry)}</td><td className="px-5 py-4 font-mono text-sm">{formatTime12(shift.exit)}</td><td className="px-5 py-4 font-mono text-sm font-bold text-[#34776f]">{formatDuration(shift.regularMinutes)}</td><td className="px-5 py-4 font-mono text-sm font-bold text-[#9b7422]">{formatDuration(shift.overtimeMinutes)}</td></tr>; })}</tbody></table></div>}
+    </section>
+  </div>;
+}
+function ReportStat({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return <div className="rounded-2xl border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-4 shadow-[var(--shadow-sm)]"><div className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{label}</div><div className="mt-2 font-display text-2xl font-bold">{value}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{detail}</div></div>;
 }
 
 function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { date: string; existing?: Shift; settings: Settings; onSave: (shift: Shift) => void; onDelete: (key: string) => void; onClose: () => void }) {
