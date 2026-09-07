@@ -12,12 +12,22 @@ import {
 import { Route, Switch, Router as WouterRouter, useLocation } from 'wouter';
 
 type View = 'dashboard' | 'calendar' | 'settings';
+type ShiftType = 'morning' | 'general' | 'night';
 type Settings = {
   dutyHours: number;
   breakMinutes: number;
+  teaBreakMinutes: number;
+  lunchBreakMinutes: number;
   hourlyRate: number;
+  dailyRate: number;
   overtimeRate: number;
+  payMode: 'hourly' | 'daily';
   bonusPerShift: number;
+  bonusTargetDays: number;
+  fullAttendanceBonus: number;
+  absentPenalty: number;
+  bonusAbsentLimit: number;
+  companyOffDays: number[];
   currency: string;
   payCycleStartDay: number;
   payCycleEndDay: number;
@@ -26,17 +36,25 @@ type Shift = {
   date: string;
   entry: string;
   exit: string;
-  shiftType: 'day' | 'night';
+  shiftType?: ShiftType | 'day';
   isHoliday: boolean;
-  breakCount: number;
+  breakCount?: number;
+  teaBreakCount?: number;
+  lunchBreakCount?: number;
   manual: boolean;
   manualAmount: number;
+  manualHours?: boolean;
+  manualPaidHours?: number;
+  manualOvertimeHours?: number;
 };
-type ComputedShift = Shift & {
+type ComputedShift = Omit<Shift, 'shiftType'> & {
+  shiftType: ShiftType;
   totalMinutes: number;
   paidMinutes: number;
   regularMinutes: number;
   overtimeMinutes: number;
+  regularPay: number;
+  overtimePay: number;
   pay: number;
 };
 
@@ -46,9 +64,18 @@ const STORAGE_SETTINGS = 'shiftpro-settings-v1';
 const defaultSettings: Settings = {
   dutyHours: 8,
   breakMinutes: 30,
+  teaBreakMinutes: 10,
+  lunchBreakMinutes: 30,
   hourlyRate: 18.5,
+  dailyRate: 148,
   overtimeRate: 27.75,
+  payMode: 'hourly',
   bonusPerShift: 0,
+  bonusTargetDays: 22,
+  fullAttendanceBonus: 3000,
+  absentPenalty: 1000,
+  bonusAbsentLimit: 1,
+  companyOffDays: [0, 6],
   currency: '₹',
   payCycleStartDay: 1,
   payCycleEndDay: 31,
@@ -110,15 +137,55 @@ function shiftDurationMinutes(entry: string, exit: string) {
   if (total < 0) total += 24 * 60;
   return total;
 }
+function normalizeShiftType(type?: Shift['shiftType']): ShiftType {
+  return type === 'night' ? 'night' : type === 'morning' ? 'morning' : 'general';
+}
+function shiftTypeLabel(type: ShiftType) {
+  return type === 'morning' ? 'Morning' : type === 'night' ? 'Night' : 'General';
+}
+function isCompanyOffDay(date: string, settings: Settings) {
+  return Boolean(settings.companyOffDays?.includes(dateFromKey(date).getDay()));
+}
+function getBreakMinutes(shift: Shift, settings: Settings) {
+  if (shift.teaBreakCount !== undefined || shift.lunchBreakCount !== undefined) {
+    return (shift.teaBreakCount || 0) * settings.teaBreakMinutes + (shift.lunchBreakCount || 0) * settings.lunchBreakMinutes;
+  }
+  return (shift.breakCount || 0) * settings.breakMinutes;
+}
 function computeShift(shift: Shift, settings: Settings): ComputedShift {
   const totalMinutes = shiftDurationMinutes(shift.entry, shift.exit);
-  const paidMinutes = Math.max(0, totalMinutes - shift.breakCount * settings.breakMinutes);
-  const regularMinutes = Math.min(paidMinutes, settings.dutyHours * 60);
-  const overtimeMinutes = Math.max(0, paidMinutes - regularMinutes);
-  const calculatedPay = (regularMinutes / 60) * settings.hourlyRate
-    + (overtimeMinutes / 60) * settings.overtimeRate
-    + settings.bonusPerShift;
-  return { ...shift, shiftType: shift.shiftType || 'day', isHoliday: Boolean(shift.isHoliday), totalMinutes, paidMinutes, regularMinutes, overtimeMinutes, pay: shift.manual && shift.manualAmount >= 0 ? shift.manualAmount : calculatedPay };
+  const calculatedPaidMinutes = Math.max(0, totalMinutes - getBreakMinutes(shift, settings));
+  const paidMinutes = shift.manualHours ? Math.max(0, Math.round((shift.manualPaidHours || 0) * 60)) : calculatedPaidMinutes;
+  const offDay = Boolean(shift.isHoliday) || isCompanyOffDay(shift.date, settings);
+  const manualOtMinutes = shift.manualHours ? Math.min(paidMinutes, Math.max(0, Math.round((shift.manualOvertimeHours || 0) * 60))) : 0;
+  const regularMinutes = offDay ? 0 : Math.max(0, Math.min(paidMinutes - manualOtMinutes, settings.dutyHours * 60 - manualOtMinutes));
+  const overtimeMinutes = offDay ? paidMinutes : Math.max(manualOtMinutes, paidMinutes - regularMinutes);
+  const regularPayBase = settings.payMode === 'daily'
+    ? (settings.dutyHours ? (regularMinutes / (settings.dutyHours * 60)) * settings.dailyRate : 0)
+    : (regularMinutes / 60) * settings.hourlyRate;
+  const calculatedRegularPay = regularPayBase + (regularMinutes > 0 ? settings.bonusPerShift : 0);
+  const calculatedOvertimePay = (overtimeMinutes / 60) * settings.overtimeRate;
+  const calculatedPay = calculatedRegularPay + calculatedOvertimePay;
+  const manualFactor = shift.manual && shift.manualAmount >= 0 && calculatedPay > 0 ? shift.manualAmount / calculatedPay : 1;
+  return { ...shift, shiftType: normalizeShiftType(shift.shiftType), isHoliday: Boolean(shift.isHoliday), totalMinutes, paidMinutes, regularMinutes, overtimeMinutes, regularPay: calculatedRegularPay * manualFactor, overtimePay: calculatedOvertimePay * manualFactor, pay: shift.manual && shift.manualAmount >= 0 ? shift.manualAmount : calculatedPay };
+}
+
+function getAttendanceSummary(period: { start: Date; end: Date }, shifts: ComputedShift[], settings: Settings) {
+  const presentDates = new Set(shifts.filter((shift) => dateFromKey(shift.date) >= period.start && dateFromKey(shift.date) <= period.end && !isCompanyOffDay(shift.date, settings)).map((shift) => shift.date));
+  let workingDays = 0;
+  for (let cursor = new Date(period.start); cursor <= period.end; cursor.setDate(cursor.getDate() + 1)) {
+    const key = dateKey(cursor);
+    if (!isCompanyOffDay(key, settings)) workingDays += 1;
+  }
+  const presentDays = presentDates.size;
+  const absentDays = Math.max(0, workingDays - presentDays);
+  const target = Math.max(0, settings.bonusTargetDays);
+  const attendanceBonus = settings.fullAttendanceBonus <= 0 ? 0 : presentDays >= target
+    ? settings.fullAttendanceBonus
+    : absentDays > settings.bonusAbsentLimit
+      ? 0
+      : Math.max(0, settings.fullAttendanceBonus - absentDays * settings.absentPenalty);
+  return { workingDays, presentDays, absentDays, attendanceBonus };
 }
 
 function useStoredData() {
@@ -178,7 +245,8 @@ function Home() {
     const date = dateFromKey(shift.date);
     return date >= payrollPeriod.start && date <= payrollPeriod.end;
   });
-  const currentMonthPay = payrollShifts.reduce((sum, shift) => sum + shift.pay, 0);
+  const attendanceSummary = getAttendanceSummary(payrollPeriod, computedShifts, storage.settings);
+  const currentMonthPay = payrollShifts.reduce((sum, shift) => sum + shift.pay, 0) + attendanceSummary.attendanceBonus;
   const currentMonthMinutes = payrollShifts.reduce((sum, shift) => sum + shift.paidMinutes, 0);
   const currentMonthOvertime = payrollShifts.reduce((sum, shift) => sum + shift.overtimeMinutes, 0);
   const todayKey = dateKey(now);
@@ -243,7 +311,7 @@ function Home() {
           <button onClick={() => { setEditorDate(todayKey); }} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-3.5 py-2.5 text-sm font-bold text-white shadow-[0_5px_15px_rgba(229,104,76,.25)] transition-transform hover:-translate-y-0.5" data-testid="button-log-shift-header"><Plus size={17} strokeWidth={2.5} /><span className="hidden sm:inline">Log a shift</span><span className="sm:hidden">Log</span></button>
         </header>
         <div className="mx-auto max-w-[1380px] px-5 py-7 md:px-10 md:py-9">
-          {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} payrollPeriod={payrollPeriod} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onPreviousPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNextPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
+          {view === 'dashboard' && <Dashboard settings={storage.settings} shifts={computedShifts} todayKey={todayKey} month={month} payrollPeriod={payrollPeriod} attendanceSummary={attendanceSummary} monthPay={currentMonthPay} monthMinutes={currentMonthMinutes} monthOvertime={currentMonthOvertime} onPreviousPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} onNextPeriod={() => setMonth(new Date(month.getFullYear(), month.getMonth() + 1, 1))} onAdd={() => { setEditorDate(todayKey); }} onEdit={setEditorDate} onCalendar={() => navigate('calendar')} />}
           {view === 'calendar' && <CalendarView month={month} setMonth={setMonth} shifts={computedShifts} settings={storage.settings} todayKey={todayKey} onEdit={setEditorDate} onAdd={(key) => setEditorDate(key)} />}
           {view === 'settings' && <SettingsView settings={storage.settings} setSettings={storage.setSettings} onSaved={() => setToast('Pay rules updated')} />}
         </div>
@@ -266,13 +334,15 @@ function MobileNav({ icon, label, active, onClick, testId }: { icon: React.React
   return <button onClick={onClick} className={`flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 text-[10px] font-bold ${active ? 'text-[hsl(var(--primary))]' : 'text-[hsl(var(--muted-foreground))]'}`} data-testid={testId}>{icon}<span>{label}</span></button>;
 }
 
-function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, monthPay, monthMinutes, monthOvertime, onPreviousPeriod, onNextPeriod, onAdd, onEdit, onCalendar }: { settings: Settings; shifts: ComputedShift[]; todayKey: string; month: Date; payrollPeriod: { start: Date; end: Date }; monthPay: number; monthMinutes: number; monthOvertime: number; onPreviousPeriod: () => void; onNextPeriod: () => void; onAdd: () => void; onEdit: (key: string) => void; onCalendar: () => void }) {
+function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, attendanceSummary, monthPay, monthMinutes, monthOvertime, onPreviousPeriod, onNextPeriod, onAdd, onEdit, onCalendar }: { settings: Settings; shifts: ComputedShift[]; todayKey: string; month: Date; payrollPeriod: { start: Date; end: Date }; attendanceSummary: { workingDays: number; presentDays: number; absentDays: number; attendanceBonus: number }; monthPay: number; monthMinutes: number; monthOvertime: number; onPreviousPeriod: () => void; onNextPeriod: () => void; onAdd: () => void; onEdit: (key: string) => void; onCalendar: () => void }) {
   const today = shifts.find((shift) => shift.date === todayKey);
   const monthShifts = shifts.filter((shift) => {
     const date = dateFromKey(shift.date);
     return date >= payrollPeriod.start && date <= payrollPeriod.end;
   }).sort((a, b) => b.date.localeCompare(a.date));
   const daysWorked = monthShifts.length;
+  const regularPay = monthShifts.reduce((sum, shift) => sum + shift.regularPay, 0);
+  const overtimePay = monthShifts.reduce((sum, shift) => sum + shift.overtimePay, 0);
   const periodDays = Math.round((payrollPeriod.end.getTime() - payrollPeriod.start.getTime()) / 86400000) + 1;
   const expectedDays = Math.max(1, Math.min(periodDays, Math.round(periodDays * 0.75)));
   const progress = Math.min(100, Math.round((daysWorked / expectedDays) * 100));
@@ -289,7 +359,7 @@ function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, monthPay,
         <div className="max-w-2xl">
           <div className="mb-4 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.2em] text-[#f9d45c]"><span className="h-1.5 w-1.5 rounded-full bg-[#f9d45c]" />{today ? 'Today is on the board' : 'Payroll period board'}</div>
           <h2 className="m-0 max-w-[680px] font-display text-[clamp(2.25rem,5vw,4.7rem)] font-bold leading-[.94] tracking-[-.055em]">{today ? `Today is worth ${formatMoney(today.pay, settings.currency)}.` : 'Make every workday count.'}</h2>
-          <p className="mt-4 max-w-xl text-sm leading-relaxed text-blue-100/80">{today ? `${formatDuration(today.paidMinutes)} paid today${today.overtimeMinutes ? ` · ${formatDuration(today.overtimeMinutes)} overtime` : ''} · ${today.shiftType === 'night' ? 'night shift' : 'day shift'}.` : 'Track day and night shifts, see overtime as it happens, and keep your Indian rupee earnings clear.'}</p>
+          <p className="mt-4 max-w-xl text-sm leading-relaxed text-blue-100/80">{today ? `${formatDuration(today.paidMinutes)} paid today${today.overtimeMinutes ? ` · ${formatDuration(today.overtimeMinutes)} overtime` : ''} · ${shiftTypeLabel(today.shiftType).toLowerCase()} shift.` : 'Track day and night shifts, see overtime as it happens, and keep your Indian rupee earnings clear.'}</p>
           <div className="mt-6 flex flex-wrap gap-3">
             <button onClick={onAdd} className="flex items-center gap-2 rounded-xl bg-[#f9d45c] px-4 py-3 text-sm font-extrabold text-[#17203d] transition-transform hover:-translate-y-0.5" data-testid="button-log-first-shift"><Plus size={17} /> Log a day</button>
             <button onClick={onCalendar} className="flex items-center gap-2 rounded-xl border border-white/25 px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10" data-testid="button-open-month">Open month <ArrowRight size={16} /></button>
@@ -308,9 +378,16 @@ function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, monthPay,
       <MetricCard label="Overtime" value={formatDuration(monthOvertime)} sub={monthOvertime ? 'at your OT rate' : 'no overtime logged'} icon={<TrendingUp size={18} />} tone="yellow" />
       <MetricCard label="Average day" value={daysWorked ? formatMoney(monthPay / daysWorked, settings.currency) : formatMoney(0, settings.currency)} sub="per logged day" icon={<Gauge size={18} />} tone="blue" />
     </section>
+    <section className="fade-up grid gap-4 md:grid-cols-[1.1fr_.9fr]">
+      <div className="rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-5 shadow-[var(--shadow-sm)] md:p-6">
+        <div className="mb-5 flex items-start justify-between"><div><div className="font-mono text-[10px] uppercase tracking-[.16em] text-[hsl(var(--primary))]">Pay breakdown</div><h3 className="mt-1 font-display text-xl font-bold">Regular day vs overtime</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Only the money from logged shifts in this payroll period.</p></div><Banknote size={20} className="text-[hsl(var(--muted-foreground))]" /></div>
+        <div className="grid gap-3 sm:grid-cols-2"><PayBreakdownCard label="Regular day pay" value={formatMoney(regularPay, settings.currency)} detail={settings.payMode === 'daily' ? 'Daily-rate mode' : 'Hourly-rate mode'} tone="teal" /><PayBreakdownCard label="Overtime pay" value={formatMoney(overtimePay, settings.currency)} detail={`${formatDuration(monthOvertime)} at OT rate`} tone="yellow" /></div>
+      </div>
+      <div className="rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-5 shadow-[var(--shadow-sm)] md:p-6"><div className="font-mono text-[10px] uppercase tracking-[.16em] text-[hsl(var(--primary))]">Attendance bonus</div><div className="mt-1 flex items-end justify-between gap-3"><h3 className="font-display text-xl font-bold">{formatMoney(attendanceSummary.attendanceBonus, settings.currency)}</h3><Sparkles size={20} className="text-[#c58e16]" /></div><p className="mt-2 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">{attendanceSummary.presentDays} present · {attendanceSummary.absentDays} absent · target {settings.bonusTargetDays} days</p><div className="mt-4 h-2 overflow-hidden rounded-full bg-[hsl(var(--muted))]"><div className="h-full rounded-full bg-[linear-gradient(90deg,#057b78,#f9d45c)]" style={{ width: `${Math.min(100, attendanceSummary.workingDays ? (attendanceSummary.presentDays / attendanceSummary.workingDays) * 100 : 0)}%` }} /></div></div>
+    </section>
     <section className="grid gap-5 lg:grid-cols-[.9fr_1.1fr]">
       <div className="fade-up delay-1 overflow-hidden rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-5 shadow-[var(--shadow-sm)] md:p-6">
-        <div className="mb-6 flex items-start justify-between"><div><div className="flex items-center gap-2"><h3 className="m-0 font-display text-lg font-bold">Workday pulse</h3><span className="rounded-md bg-[#d8f0eb] px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[.1em] text-[#267163]">Live</span></div><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Your workdays this month</p></div><button onClick={onCalendar} className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-view-calendar"><CalendarDays size={18} /></button></div>
+         <div className="mb-6 flex items-start justify-between"><div><div className="flex items-center gap-2"><h3 className="m-0 font-display text-lg font-bold">Workday pulse</h3><span className="rounded-md bg-[#d8f0eb] px-2 py-1 font-mono text-[9px] font-bold uppercase tracking-[.1em] text-[#267163]">Live</span></div><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Your workdays this payroll period</p></div><button onClick={onCalendar} className="rounded-lg p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-view-calendar"><CalendarDays size={18} /></button></div>
         <div className="flex items-center gap-5"><div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full" style={{ background: `conic-gradient(#057b78 ${progress}%, hsl(var(--muted)) ${progress}% 100%)` }}><div className="flex h-[92px] w-[92px] flex-col items-center justify-center rounded-full bg-[hsl(var(--card))]"><strong className="font-display text-3xl">{progress}%</strong><span className="font-mono text-[9px] uppercase tracking-widest text-[hsl(var(--muted-foreground))]">on track</span></div></div><div className="min-w-0"><div className="font-display text-2xl font-bold">{daysWorked} <span className="text-sm font-medium text-[hsl(var(--muted-foreground))]">{daysWorked === 1 ? 'day' : 'days'}</span></div><p className="mt-2 max-w-[260px] text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">{daysWorked ? 'Every entry is turning into a clearer payday.' : 'Your calendar is waiting for its first day. Start with today.'}</p></div></div>
         <div className="mt-7 h-2 overflow-hidden rounded-full bg-[hsl(var(--muted))]"><div className="h-full rounded-full bg-[linear-gradient(90deg,#057b78,#f9d45c)] transition-all" style={{ width: `${progress}%` }} /></div>
       </div>
@@ -325,6 +402,9 @@ function Dashboard({ settings, shifts, todayKey, month, payrollPeriod, monthPay,
 function MetricCard({ label, value, sub, icon, tone }: { label: string; value: string; sub: string; icon: React.ReactNode; tone: string }) {
   const colors: Record<string, string> = { coral: 'bg-[#fde3dc] text-[#c65241]', teal: 'bg-[#d9efeb] text-[#34776f]', yellow: 'bg-[#fff0bd] text-[#9b7422]', blue: 'bg-[#dce8f1] text-[#39627a]' };
   return <div className="fade-up rounded-[18px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] p-4 shadow-[var(--shadow-sm)]"><div className="mb-4 flex items-center justify-between"><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{label}</span><span className={`flex h-8 w-8 items-center justify-center rounded-lg ${colors[tone]}`}>{icon}</span></div><div className="font-display text-[25px] font-bold tracking-tight">{value}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{sub}</div></div>;
+}
+function PayBreakdownCard({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'teal' | 'yellow' }) {
+  return <div className={`rounded-2xl p-4 ${tone === 'teal' ? 'bg-[#e4f5ed]' : 'bg-[#fff3c9]'}`}><div className={`font-mono text-[10px] uppercase tracking-[.1em] ${tone === 'teal' ? 'text-[#34776f]' : 'text-[#9b7422]'}`}>{label}</div><div className="mt-2 font-display text-2xl font-bold">{value}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{detail}</div></div>;
 }
 function EmptyMini({ onAdd }: { onAdd: () => void }) {
   return <div className="rounded-xl bg-[hsl(var(--muted)/.65)] px-4 py-5 text-center"><div className="mx-auto mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-[hsl(var(--accent))] text-slate-800"><Plus size={18} /></div><p className="m-0 text-sm font-semibold">No days this month</p><button onClick={onAdd} className="mt-2 text-xs font-bold text-[hsl(var(--primary))] hover:underline" data-testid="button-empty-add-shift">Add your first day</button></div>;
@@ -367,22 +447,30 @@ function CalendarView({ month, setMonth, shifts, settings, todayKey, onEdit, onA
 function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { date: string; existing?: Shift; settings: Settings; onSave: (shift: Shift) => void; onDelete: (key: string) => void; onClose: () => void }) {
   const [entry, setEntry] = useState(existing?.entry || '09:00');
   const [exit, setExit] = useState(existing?.exit || '17:00');
-  const [shiftType, setShiftType] = useState<'day' | 'night'>(existing?.shiftType || 'day');
+  const [shiftType, setShiftType] = useState<ShiftType>(normalizeShiftType(existing?.shiftType));
   const [isHoliday, setIsHoliday] = useState(existing?.isHoliday || false);
-  const [breakCount, setBreakCount] = useState(existing?.breakCount ?? 1);
+  const [teaBreakCount, setTeaBreakCount] = useState(existing?.teaBreakCount ?? 0);
+  const [lunchBreakCount, setLunchBreakCount] = useState(existing?.lunchBreakCount ?? existing?.breakCount ?? 1);
   const [manual, setManual] = useState(existing?.manual || false);
   const [manualAmount, setManualAmount] = useState(existing?.manualAmount?.toString() || '');
+  const [manualHours, setManualHours] = useState(existing?.manualHours || false);
+  const [manualPaidHours, setManualPaidHours] = useState(existing?.manualPaidHours?.toString() || '');
+  const [manualOvertimeHours, setManualOvertimeHours] = useState(existing?.manualOvertimeHours?.toString() || '');
   const [error, setError] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
-  const preview = computeShift({ date, entry, exit, shiftType, isHoliday, breakCount, manual, manualAmount: Number(manualAmount) || 0 }, settings);
+  const draftShift: Shift = { date, entry, exit, shiftType, isHoliday, teaBreakCount, lunchBreakCount, manual, manualAmount: Number(manualAmount) || 0, manualHours, manualPaidHours: Number(manualPaidHours) || 0, manualOvertimeHours: Number(manualOvertimeHours) || 0 };
+  const preview = computeShift(draftShift, settings);
   const isOvernight = minutesFromTime(exit) < minutesFromTime(entry);
+  const isOffDay = isHoliday || isCompanyOffDay(date, settings);
   useEffect(() => { panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, []);
   function save() {
     const total = shiftDurationMinutes(entry, exit);
+    const breakMinutes = getBreakMinutes(draftShift, settings);
     if (!entry || !exit) { setError('Add both an entry and exit time.'); return; }
-    if (total <= breakCount * settings.breakMinutes) { setError('Your break time cannot be longer than this shift.'); return; }
+    if (total <= breakMinutes) { setError('Your break time cannot be longer than this shift.'); return; }
     if (manual && (!manualAmount || Number(manualAmount) < 0)) { setError('Add the manual amount you want to use.'); return; }
-    onSave({ date, entry, exit, shiftType, isHoliday, breakCount, manual, manualAmount: Number(manualAmount) || 0 });
+    if (manualHours && (!manualPaidHours || Number(manualPaidHours) < 0 || Number(manualOvertimeHours) < 0 || Number(manualOvertimeHours) > Number(manualPaidHours))) { setError('Check your manual paid and overtime hours.'); return; }
+    onSave(draftShift);
   }
   const labelDate = friendlyDate(date, true);
   return <div className="fixed inset-0 z-40 flex items-end justify-center bg-slate-950/40 p-0 backdrop-blur-[2px] sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><div ref={panelRef} className="fade-up max-h-[92dvh] w-full overflow-y-auto rounded-t-[25px] border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-2xl sm:max-w-[540px] sm:rounded-[25px]">
@@ -390,12 +478,14 @@ function ShiftEditor({ date, existing, settings, onSave, onDelete, onClose }: { 
      <div className="space-y-5 px-5 py-6 md:px-7">
         <div className="grid grid-cols-2 gap-3"><TimeField label="Entry (AM / PM)" value={entry} onChange={setEntry} testId="input-entry-time" /><TimeField label="Exit (AM / PM)" value={exit} onChange={setExit} testId="input-exit-time" /></div>
         <div className="flex items-center gap-2 rounded-xl bg-[hsl(var(--muted)/.65)] px-3 py-2.5 text-xs text-[hsl(var(--muted-foreground))]"><Clock3 size={14} className="shrink-0 text-[hsl(var(--primary))]" />{isOvernight ? 'Overnight timing: exit is counted on the next day, and extra time after regular duty becomes OT.' : `Regular duty is ${settings.dutyHours}h; anything beyond it becomes OT.`}</div>
-       <div><div className="mb-2 flex items-center justify-between"><label className="text-sm font-bold">Shift type</label><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{shiftType === 'night' ? 'Night hours' : 'Day hours'}</span></div><div className="grid grid-cols-2 gap-2"><button type="button" onClick={() => setShiftType('day')} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition-colors ${shiftType === 'day' ? 'border-[#4aaa83] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-day"><Sun size={16} /> Day shift</button><button type="button" onClick={() => setShiftType('night')} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-sm font-bold transition-colors ${shiftType === 'night' ? 'border-[#9e7bd0] bg-[#eee8fc] text-[#6d4a9d]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-night"><Moon size={16} /> Night shift</button></div></div>
-       <button type="button" onClick={() => setIsHoliday(!isHoliday)} className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-3 text-left transition-colors ${isHoliday ? 'border-[#e87368] bg-[#ffe1de]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))]'}`} aria-pressed={isHoliday} data-testid="button-toggle-holiday"><span><span className="block text-sm font-bold">Holiday workday</span><span className="mt-0.5 block text-[11px] text-[hsl(var(--muted-foreground))]">Show this date in red on the calendar</span></span><span className={`relative h-6 w-11 rounded-full transition-colors ${isHoliday ? 'bg-[#d94f49]' : 'bg-[hsl(var(--border))]'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${isHoliday ? 'left-6' : 'left-1'}`} /></span></button>
-      <div className="rounded-2xl bg-[hsl(var(--muted)/.65)] p-4"><div className="mb-3 flex items-center justify-between"><label className="flex items-center gap-2 text-sm font-bold"><Coffee size={16} className="text-[hsl(var(--primary))]" />Breaks taken</label><span className="font-mono text-[10px] text-[hsl(var(--muted-foreground))]">{settings.breakMinutes} min each</span></div><div className="flex items-center justify-between"><span className="text-xs text-[hsl(var(--muted-foreground))]">Unpaid breaks during this shift</span><div className="flex items-center gap-3"><button onClick={() => setBreakCount(Math.max(0, breakCount - 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-decrease">−</button><span className="w-5 text-center font-mono font-medium" data-testid="text-break-count">{breakCount}</span><button onClick={() => setBreakCount(Math.min(8, breakCount + 1))} className="flex h-8 w-8 items-center justify-center rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] text-lg font-medium" data-testid="button-break-increase">+</button></div></div></div>
-      <div className="grid grid-cols-3 gap-2 rounded-2xl border border-[hsl(var(--border))] bg-[#fffaf0] p-3 text-center"><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Paid time</div><strong className="mt-1 block font-display text-lg">{formatDuration(preview.paidMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Regular</div><strong className="mt-1 block font-display text-lg">{formatDuration(preview.regularMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Est. pay</div><strong className="mt-1 block font-display text-lg text-[hsl(var(--primary))]">{formatMoney(preview.pay, settings.currency)}</strong></div></div>
+        <div><div className="mb-2 flex items-center justify-between"><label className="text-sm font-bold">Shift type</label><span className="font-mono text-[10px] uppercase tracking-[.12em] text-[hsl(var(--muted-foreground))]">{shiftTypeLabel(shiftType)} hours</span></div><div className="grid grid-cols-3 gap-2"><button type="button" onClick={() => setShiftType('morning')} className={`flex items-center justify-center gap-1.5 rounded-xl border px-2 py-3 text-xs font-bold transition-colors ${shiftType === 'morning' ? 'border-[#4aaa83] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-morning"><Sun size={15} /> Morning</button><button type="button" onClick={() => setShiftType('general')} className={`flex items-center justify-center gap-1.5 rounded-xl border px-2 py-3 text-xs font-bold transition-colors ${shiftType === 'general' ? 'border-[#4aaa83] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-general"><Clock3 size={15} /> General</button><button type="button" onClick={() => setShiftType('night')} className={`flex items-center justify-center gap-1.5 rounded-xl border px-2 py-3 text-xs font-bold transition-colors ${shiftType === 'night' ? 'border-[#9e7bd0] bg-[#eee8fc] text-[#6d4a9d]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))]'}`} data-testid="button-shift-night"><Moon size={15} /> Night</button></div></div>
+        <button type="button" onClick={() => setIsHoliday(!isHoliday)} className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-3 text-left transition-colors ${isHoliday ? 'border-[#e87368] bg-[#ffe1de]' : 'border-[hsl(var(--border))] bg-[hsl(var(--card))]'}`} aria-pressed={isHoliday} data-testid="button-toggle-holiday"><span><span className="block text-sm font-bold">Holiday workday</span><span className="mt-0.5 block text-[11px] text-[hsl(var(--muted-foreground))]">{isHoliday ? 'All paid hours become overtime' : 'Show this date in red on the calendar'}</span></span><span className={`relative h-6 w-11 rounded-full transition-colors ${isHoliday ? 'bg-[#d94f49]' : 'bg-[hsl(var(--border))]'}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${isHoliday ? 'left-6' : 'left-1'}`} /></span></button>
+       <div className="rounded-2xl bg-[hsl(var(--muted)/.65)] p-4"><div className="mb-3 flex items-center justify-between"><label className="flex items-center gap-2 text-sm font-bold"><Coffee size={16} className="text-[hsl(var(--primary))]" />Breaks taken</label><span className="font-mono text-[10px] text-[hsl(var(--muted-foreground))]">deducted automatically</span></div><div className="grid grid-cols-2 gap-3"><label className="text-xs font-bold">Tea breaks<select value={teaBreakCount} onChange={(event) => setTeaBreakCount(Number(event.target.value))} className="shift-input mt-1.5 text-sm" data-testid="select-tea-breaks">{Array.from({ length: 9 }, (_, index) => <option key={index} value={index}>{index} × {settings.teaBreakMinutes} min</option>)}</select></label><label className="text-xs font-bold">Lunch breaks<select value={lunchBreakCount} onChange={(event) => setLunchBreakCount(Number(event.target.value))} className="shift-input mt-1.5 text-sm" data-testid="select-lunch-breaks">{Array.from({ length: 4 }, (_, index) => <option key={index} value={index}>{index} × {settings.lunchBreakMinutes} min</option>)}</select></label></div></div>
+       {isOffDay && <div className="flex items-center gap-2 rounded-xl bg-[#fff0bd] px-3 py-2.5 text-xs font-semibold text-[#7a5b1b]"><Zap size={15} />Company off-day: all paid hours are overtime.</div>}
+       <div className="grid grid-cols-4 gap-2 rounded-2xl border border-[hsl(var(--border))] bg-[#fffaf0] p-3 text-center"><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Paid</div><strong className="mt-1 block font-display text-base">{formatDuration(preview.paidMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Regular</div><strong className="mt-1 block font-display text-base">{formatDuration(preview.regularMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">OT</div><strong className="mt-1 block font-display text-base">{formatDuration(preview.overtimeMinutes)}</strong></div><div><div className="font-mono text-[9px] uppercase tracking-[.1em] text-[hsl(var(--muted-foreground))]">Pay</div><strong className="mt-1 block font-display text-base text-[hsl(var(--primary))]">{formatMoney(preview.pay, settings.currency)}</strong></div></div>
       {preview.overtimeMinutes > 0 && <div className="flex items-center gap-2 rounded-xl bg-[#fff0bd] px-3 py-2.5 text-xs font-semibold text-[#7a5b1b]"><TrendingUp size={15} />{formatDuration(preview.overtimeMinutes)} will be paid at your overtime rate.</div>}
-      <div className="rounded-xl border border-[hsl(var(--border))] px-3.5 py-3"><div className="flex items-center justify-between gap-3"><div><div className="text-sm font-bold">Use a manual total</div><div className="mt-0.5 text-[11px] text-[hsl(var(--muted-foreground))]">For payslips or a manager-approved amount</div></div><button onClick={() => setManual(!manual)} className={`relative h-6 w-11 rounded-full transition-colors ${manual ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--border))]'}`} aria-pressed={manual} data-testid="button-toggle-manual-pay"><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${manual ? 'left-6' : 'left-1'}`} /></button></div>{manual && <div className="mt-3"><label className="mb-1.5 block text-xs font-bold" htmlFor="manual-total">Amount ({settings.currency})</label><input id="manual-total" type="number" min="0" step="0.01" value={manualAmount} onChange={(event) => setManualAmount(event.target.value)} className="shift-input" placeholder="0.00" data-testid="input-manual-amount" /></div>}</div>
+       <div className="rounded-xl border border-[hsl(var(--border))] px-3.5 py-3"><div className="flex items-center justify-between gap-3"><div><div className="text-sm font-bold">Adjust hours manually</div><div className="mt-0.5 text-[11px] text-[hsl(var(--muted-foreground))]">Use approved paid and overtime hours</div></div><button onClick={() => setManualHours(!manualHours)} className={`relative h-6 w-11 rounded-full transition-colors ${manualHours ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--border))]'}`} aria-pressed={manualHours} data-testid="button-toggle-manual-hours"><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${manualHours ? 'left-6' : 'left-1'}`} /></button></div>{manualHours && <div className="mt-3 grid grid-cols-2 gap-3"><label className="text-xs font-bold">Paid hours<input type="number" min="0" step="0.25" value={manualPaidHours} onChange={(event) => setManualPaidHours(event.target.value)} className="shift-input mt-1.5" placeholder="8" data-testid="input-manual-paid-hours" /></label><label className="text-xs font-bold">OT hours<input type="number" min="0" step="0.25" value={manualOvertimeHours} onChange={(event) => setManualOvertimeHours(event.target.value)} className="shift-input mt-1.5" placeholder="0" data-testid="input-manual-overtime-hours" /></label></div>}</div>
+       <div className="rounded-xl border border-[hsl(var(--border))] px-3.5 py-3"><div className="flex items-center justify-between gap-3"><div><div className="text-sm font-bold">Use a manual total</div><div className="mt-0.5 text-[11px] text-[hsl(var(--muted-foreground))]">For payslips or a manager-approved amount</div></div><button onClick={() => setManual(!manual)} className={`relative h-6 w-11 rounded-full transition-colors ${manual ? 'bg-[hsl(var(--primary))]' : 'bg-[hsl(var(--border))]'}`} aria-pressed={manual} data-testid="button-toggle-manual-pay"><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${manual ? 'left-6' : 'left-1'}`} /></button></div>{manual && <div className="mt-3"><label className="mb-1.5 block text-xs font-bold" htmlFor="manual-total">Amount ({settings.currency})</label><input id="manual-total" type="number" min="0" step="0.01" value={manualAmount} onChange={(event) => setManualAmount(event.target.value)} className="shift-input" placeholder="0.00" data-testid="input-manual-amount" /></div>}</div>
       {error && <div className="rounded-xl bg-[#fbe1dd] px-3 py-2.5 text-xs font-semibold text-[#a83c33]" role="alert" data-testid="status-editor-error">{error}</div>}
       <div className="flex gap-2.5 pt-1"><button onClick={save} className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-3.5 text-sm font-bold text-white shadow-md shadow-orange-950/10 transition-transform hover:-translate-y-0.5" data-testid="button-save-shift"><Save size={16} /> Save shift</button>{existing && <button onClick={() => { if (window.confirm('Remove this shift from your journal?')) onDelete(date); }} className="rounded-xl border border-[#f0c8c2] px-4 text-[#b34a40] hover:bg-[#fbe8e5]" data-testid="button-delete-shift"><Trash2 size={17} /></button>}</div>
     </div>
@@ -422,12 +512,12 @@ function SettingsView({ settings, setSettings, onSaved }: { settings: Settings; 
   const [draft, setDraft] = useState(settings);
   useEffect(() => setDraft(settings), [settings]);
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { setDraft((current) => ({ ...current, [key]: value })); }
-  function save() { if (draft.dutyHours <= 0 || draft.breakMinutes < 0 || draft.hourlyRate < 0 || draft.overtimeRate < 0 || draft.bonusPerShift < 0 || draft.payCycleStartDay < 1 || draft.payCycleStartDay > 31 || draft.payCycleEndDay < 1 || draft.payCycleEndDay > 31) return; setSettings({ ...draft, payCycleStartDay: clampDay(draft.payCycleStartDay), payCycleEndDay: clampDay(draft.payCycleEndDay), currency: '₹' }); onSaved(); }
+  function save() { if (draft.dutyHours <= 0 || draft.breakMinutes < 0 || draft.teaBreakMinutes < 0 || draft.lunchBreakMinutes < 0 || draft.hourlyRate < 0 || draft.dailyRate < 0 || draft.overtimeRate < 0 || draft.bonusPerShift < 0 || draft.fullAttendanceBonus < 0 || draft.absentPenalty < 0 || draft.bonusTargetDays < 0 || draft.bonusAbsentLimit < 0 || draft.payCycleStartDay < 1 || draft.payCycleStartDay > 31 || draft.payCycleEndDay < 1 || draft.payCycleEndDay > 31) return; setSettings({ ...draft, payCycleStartDay: clampDay(draft.payCycleStartDay), payCycleEndDay: clampDay(draft.payCycleEndDay), companyOffDays: [...draft.companyOffDays].sort(), currency: '₹' }); onSaved(); }
   return <div className="mx-auto max-w-[900px] space-y-7">
     <section className="fade-up"><div className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[.18em] text-[hsl(var(--primary))]"><SettingsIcon size={14} /> Personal rules</div><h2 className="m-0 font-display text-3xl font-bold tracking-tight md:text-4xl">Make the maths yours.</h2><p className="mt-2 max-w-xl text-sm leading-relaxed text-[hsl(var(--muted-foreground))]">Set the rules from your contract or payslip. Every shift will use these numbers instantly.</p></section>
     <section className="fade-up delay-1 overflow-hidden rounded-[22px] border border-[hsl(var(--card-border))] bg-[hsl(var(--card))] shadow-[var(--shadow-sm)]"><div className="border-b border-[hsl(var(--border))] bg-[#fff7df] px-5 py-4 md:px-7"><div className="flex items-start gap-3"><div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--accent))]"><CircleHelp size={16} /></div><div><div className="text-sm font-bold">These settings stay on this device</div><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">ShiftPro never sends your rates anywhere. Change them whenever your contract does.</p></div></div></div><div className="grid gap-8 p-5 md:grid-cols-2 md:p-7">
-       <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Time rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">How your hours become paid hours</p></div><SettingField label="Standard duty hours" hint="Hours before overtime begins" suffix="hours"><input type="number" min="0.5" max="24" step="0.5" value={draft.dutyHours} onChange={(event) => update('dutyHours', Number(event.target.value))} className="shift-input pr-16" data-testid="input-duty-hours" /></SettingField><SettingField label="Break length" hint="Applied for each break count" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.breakMinutes} onChange={(event) => update('breakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-break-minutes" /></SettingField><div className="border-t border-[hsl(var(--border))] pt-5"><h3 className="m-0 font-display text-lg font-bold">Company payroll month</h3><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">Use your company’s cycle, for example day 26 to day 25.</p><div className="mt-4 grid grid-cols-2 gap-3"><SettingField label="Starts on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleStartDay} onChange={(event) => update('payCycleStartDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-start" /></SettingField><SettingField label="Ends on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleEndDay} onChange={(event) => update('payCycleEndDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-end" /></SettingField></div></div></div>
-      <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Pay rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">The rates behind your estimate</p></div><SettingField label="Regular hourly rate" hint="Your standard rate" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.hourlyRate} onChange={(event) => update('hourlyRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-hourly-rate" /></SettingField><SettingField label="Overtime hourly rate" hint="Applied after standard duty hours" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.overtimeRate} onChange={(event) => update('overtimeRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-overtime-rate" /></SettingField><SettingField label="Bonus per shift" hint="Optional fixed bonus added each time" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.bonusPerShift} onChange={(event) => update('bonusPerShift', Number(event.target.value))} className="shift-input pr-16" data-testid="input-bonus-rate" /></SettingField></div>
+        <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Time rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">How your hours become paid hours</p></div><SettingField label="Standard daily duty hours" hint="Hours before overtime begins" suffix="hours"><input type="number" min="0.5" max="24" step="0.5" value={draft.dutyHours} onChange={(event) => update('dutyHours', Number(event.target.value))} className="shift-input pr-16" data-testid="input-duty-hours" /></SettingField><div className="grid grid-cols-2 gap-3"><SettingField label="Tea break" hint="Per break" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.teaBreakMinutes} onChange={(event) => update('teaBreakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-tea-break-minutes" /></SettingField><SettingField label="Lunch break" hint="Per break" suffix="minutes"><input type="number" min="0" max="240" step="5" value={draft.lunchBreakMinutes} onChange={(event) => update('lunchBreakMinutes', Number(event.target.value))} className="shift-input pr-16" data-testid="input-lunch-break-minutes" /></SettingField></div><div className="border-t border-[hsl(var(--border))] pt-5"><h3 className="m-0 font-display text-lg font-bold">Company payroll month</h3><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">Use your company’s cycle, for example day 26 to day 25.</p><div className="mt-4 grid grid-cols-2 gap-3"><SettingField label="Starts on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleStartDay} onChange={(event) => update('payCycleStartDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-start" /></SettingField><SettingField label="Ends on" hint="Calendar day" suffix="day"><input type="number" min="1" max="31" step="1" value={draft.payCycleEndDay} onChange={(event) => update('payCycleEndDay', Number(event.target.value))} className="shift-input pr-14" data-testid="input-pay-cycle-end" /></SettingField></div></div><div className="border-t border-[hsl(var(--border))] pt-5"><h3 className="m-0 font-display text-lg font-bold">Company off-days</h3><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">Work logged on these days is automatically 100% overtime.</p><div className="mt-3 grid grid-cols-2 gap-2">{[['0', 'Sunday'], ['1', 'Monday'], ['2', 'Tuesday'], ['3', 'Wednesday'], ['4', 'Thursday'], ['5', 'Friday'], ['6', 'Saturday']].map(([value, label]) => <label key={value} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-bold ${draft.companyOffDays.includes(Number(value)) ? 'border-[#4aaa83] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))]'}`}><input type="checkbox" checked={draft.companyOffDays.includes(Number(value))} onChange={(event) => update('companyOffDays', event.target.checked ? [...draft.companyOffDays, Number(value)] : draft.companyOffDays.filter((day) => day !== Number(value)))} className="accent-[#34776f]" data-testid={`checkbox-off-day-${value}`} />{label}</label>)}</div></div></div>
+       <div className="space-y-5"><div><h3 className="m-0 font-display text-lg font-bold">Pay rules</h3><p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">Choose whether regular pay is calculated by hour or by a standard day.</p></div><div className="grid grid-cols-2 gap-2"><button type="button" onClick={() => update('payMode', 'hourly')} className={`rounded-xl border px-3 py-3 text-sm font-bold ${draft.payMode === 'hourly' ? 'border-[#34776f] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))]'}`} data-testid="button-pay-mode-hourly">Hourly pay</button><button type="button" onClick={() => update('payMode', 'daily')} className={`rounded-xl border px-3 py-3 text-sm font-bold ${draft.payMode === 'daily' ? 'border-[#34776f] bg-[#e4f5ed] text-[#256b56]' : 'border-[hsl(var(--border))]'}`} data-testid="button-pay-mode-daily">Daily pay</button></div>{draft.payMode === 'hourly' ? <SettingField label="Regular hourly rate" hint="Paid for each regular hour" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.hourlyRate} onChange={(event) => update('hourlyRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-hourly-rate" /></SettingField> : <SettingField label="Standard day rate" hint={`Full ${draft.dutyHours}h regular day`} suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.dailyRate} onChange={(event) => update('dailyRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-daily-rate" /></SettingField>}<SettingField label="Overtime hourly rate" hint="Always paid separately for OT hours" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.overtimeRate} onChange={(event) => update('overtimeRate', Number(event.target.value))} className="shift-input pr-16" data-testid="input-overtime-rate" /></SettingField><SettingField label="Bonus per regular day" hint="Optional fixed bonus per worked regular day" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.bonusPerShift} onChange={(event) => update('bonusPerShift', Number(event.target.value))} className="shift-input pr-16" data-testid="input-bonus-rate" /></SettingField><div className="border-t border-[hsl(var(--border))] pt-5"><h3 className="m-0 font-display text-lg font-bold">Attendance bonus</h3><p className="mt-1 text-xs leading-relaxed text-[hsl(var(--muted-foreground))]">Set the target, penalty, and zero-bonus absence limit.</p><div className="mt-4 space-y-3"><SettingField label="Target present days" hint="Days needed for full bonus" suffix="days"><input type="number" min="0" max="31" step="1" value={draft.bonusTargetDays} onChange={(event) => update('bonusTargetDays', Number(event.target.value))} className="shift-input pr-14" data-testid="input-bonus-target-days" /></SettingField><SettingField label="Full attendance bonus" hint="Paid when target is reached" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.fullAttendanceBonus} onChange={(event) => update('fullAttendanceBonus', Number(event.target.value))} className="shift-input pr-16" data-testid="input-full-attendance-bonus" /></SettingField><div className="grid grid-cols-2 gap-3"><SettingField label="Absent penalty" hint="Deduct per absence" suffix={draft.currency}><input type="number" min="0" step="0.01" value={draft.absentPenalty} onChange={(event) => update('absentPenalty', Number(event.target.value))} className="shift-input pr-16" data-testid="input-absent-penalty" /></SettingField><SettingField label="Zero bonus after" hint="Absences above this" suffix="days"><input type="number" min="0" max="31" step="1" value={draft.bonusAbsentLimit} onChange={(event) => update('bonusAbsentLimit', Number(event.target.value))} className="shift-input pr-14" data-testid="input-bonus-absent-limit" /></SettingField></div></div></div></div>
     </div><div className="flex items-center justify-end gap-3 border-t border-[hsl(var(--border))] bg-[hsl(var(--muted)/.35)] px-5 py-4 md:px-7"><span className="mr-auto hidden text-xs text-[hsl(var(--muted-foreground))] sm:block">Used for all new and existing shift estimates</span><button onClick={() => setDraft(settings)} className="rounded-xl px-3.5 py-2.5 text-sm font-bold text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))]" data-testid="button-reset-settings">Reset</button><button onClick={save} className="flex items-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-4 py-2.5 text-sm font-bold text-white shadow-sm" data-testid="button-save-settings"><Check size={16} />Save rules</button></div></section>
     <section className="fade-up delay-2 grid gap-4 sm:grid-cols-3"><InfoTile icon={<Clock3 size={17} />} label="Regular time" value={`${draft.dutyHours}h`} /><InfoTile icon={<TrendingUp size={17} />} label="OT starts after" value={`${draft.dutyHours} hours`} /><InfoTile icon={<Banknote size={17} />} label="OT rate" value={formatMoney(draft.overtimeRate, draft.currency)} /></section>
   </div>;
